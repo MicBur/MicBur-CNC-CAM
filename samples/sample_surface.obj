@@ -1,0 +1,31 @@
+# Sample 3D Freiform-Fläche (Wavefront OBJ) für Gemini CNC
+o SampleSurface
+
+# Eckpunkte eines 3D-Reliefs
+v -25.0 -25.0 0.0
+v 0.0 -25.0 4.0
+v 25.0 -25.0 0.0
+
+v -25.0 0.0 6.0
+v 0.0 0.0 12.0
+v 25.0 0.0 6.0
+
+v -25.0 25.0 0.0
+v 0.0 25.0 4.0
+v 25.0 25.0 0.0
+
+# Normalen
+vn 0.0 0.0 1.0
+
+# Flächen (Dreiecke)
+f 1//1 2//1 5//1
+f 1//1 5//1 4//1
+
+f 2//1 3//1 6//1
+f 2//1 6//1 5//1
+
+f 4//1 5//1 8//1
+f 4//1 8//1 7//1
+
+f 5//1 6//1 9//1
+f 5//1 9//1 8//1
