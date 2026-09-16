@@ -3,12 +3,15 @@
 #include <QPalette>
 #include <QColor>
 #include <QFont>
+#include <QIcon>
 #include "ui/MainWindow.h"
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("Gemini CNC Control"));
-    app.setApplicationVersion(QStringLiteral("1.0.0"));
+    app.setApplicationVersion(QStringLiteral("1.1.0"));
+    app.setApplicationDisplayName(QStringLiteral("MicBur-CNC-CAM"));
+    app.setWindowIcon(QIcon(QStringLiteral(":/icons/app_icon.png")));
     app.setOrganizationName(QStringLiteral("Gemini Anti-Gravity"));
 
     // Modernes Fusion Dark Styling für Industrie-Software

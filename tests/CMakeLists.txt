@@ -41,3 +41,10 @@ target_link_libraries(TestWinMax PRIVATE
     Qt6::Widgets
 )
 add_test(NAME TestWinMax COMMAND TestWinMax)
+
+# Sichtprüfung der Werkstück-Darstellung (kein automatischer Test)
+add_executable(RenderPreview RenderPreview.cpp)
+target_link_libraries(RenderPreview PRIVATE
+    cnc_ui
+    Qt6::Widgets
+)

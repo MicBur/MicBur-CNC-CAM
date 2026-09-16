@@ -6,6 +6,7 @@
 #include <QSaveFile>
 #include <QDir>
 #include <QStandardPaths>
+#include <QCoreApplication>
 
 namespace GeminiCNC::Core {
 
@@ -78,7 +79,14 @@ ToolDefinition ToolDefinition::fromJson(const QJsonObject& json) {
 }
 
 QString ToolDefinition::defaultLibraryPath() {
-    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    // Portable Version (USB-Stick): Datei "portable.txt" neben der .exe → Daten im Programmordner
+    const QString appDir = QCoreApplication::instance() ? QCoreApplication::applicationDirPath() : QString();
+    QString dir;
+    if (!appDir.isEmpty() && QFileInfo::exists(QDir(appDir).filePath(QStringLiteral("portable.txt")))) {
+        dir = QDir(appDir).filePath(QStringLiteral("daten"));
+    } else {
+        dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    }
     if (dir.isEmpty()) {
         dir = QDir::homePath() + QStringLiteral("/.geminicnc");
     }

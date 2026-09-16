@@ -181,14 +181,15 @@ float valueNoise(vec2 p) {
 // Rauheit weitet die Lichtquellen auf (grobe Näherung einer vorgefilterten Umgebung).
 vec3 environment(vec3 dir, float rough) {
     float up = clamp(dir.z * 0.5 + 0.5, 0.0, 1.0);
-    vec3 c = mix(vec3(0.05, 0.05, 0.06), vec3(0.35, 0.37, 0.40), smoothstep(0.2, 0.52, up));
-    c = mix(c, vec3(0.70, 0.74, 0.80), smoothstep(0.52, 1.0, up));
+    // Hallenboden, helle Hallenwände am Horizont (spiegeln sich in senkrechten Wänden), gedämpfte Decke
+    vec3 c = mix(vec3(0.05, 0.052, 0.058), vec3(0.30, 0.31, 0.33), smoothstep(0.25, 0.5, up));
+    c = mix(c, vec3(0.22, 0.235, 0.26), smoothstep(0.55, 1.0, up));
     float spread = rough * rough * 0.9;
-    float key = smoothstep(0.90 - spread, 0.985, dot(dir, normalize(vec3(0.45, -0.55, 0.70))));
-    float fill = smoothstep(0.93 - spread, 0.99, dot(dir, normalize(vec3(-0.75, 0.35, 0.56))));
-    float strip = smoothstep(0.975 - spread * 0.5, 1.0, 1.0 - abs(dir.y)) * smoothstep(0.1, 0.5, dir.z);
-    float energy = 1.0 / (1.0 + 6.0 * spread);
-    return c + (vec3(5.0) * key + vec3(2.5) * fill + vec3(1.2) * strip) * energy;
+    float key = smoothstep(0.92 - spread, 0.99, dot(dir, normalize(vec3(0.45, -0.55, 0.70))));
+    float fill = smoothstep(0.95 - spread, 0.995, dot(dir, normalize(vec3(-0.75, 0.35, 0.56))));
+    float strip = smoothstep(0.985 - spread * 0.5, 1.0, 1.0 - abs(dir.y)) * smoothstep(0.1, 0.5, dir.z);
+    float energy = 1.0 / (1.0 + 8.0 * spread);
+    return c + (vec3(2.6) * key + vec3(1.0) * fill + vec3(0.6) * strip) * energy;
 }
 
 float D_GGX(float NdotH, float a) {
@@ -217,40 +218,58 @@ vec2 envBRDFApprox(float NdotV, float rough) {
 
 // Fräserspuren als feine Riefen: Normale kippt entlang der Vorschubrichtung, Rauheit variiert.
 // Zu feine Spuren (weit weg) werden ausgeblendet, damit nichts flimmert.
-vec3 applyToolMarks(vec3 N, float cut, out float roughOffset) {
+// Fräserspuren: Riefen der Schneide in drei Maßstäben (echter Vorschub je Umdrehung und gröbere Stufen,
+// damit die Spuren auch aus Entfernung sichtbar bleiben) und Absätze zwischen zwei Bahnen.
+// Zu feine Stufen werden über fwidth ausgeblendet, damit nichts flimmert.
+vec3 applyToolMarks(vec3 N, float cut, out float roughOffset, out float albedoShade) {
     roughOffset = 0.0;
+    albedoShade = 1.0;
     if (cut < 0.01) return N;
 
     int kind = int(v_MarkDir.z + 0.5);
     vec2 dir = v_MarkDir.xy;
     float dirLen = length(dir);
     dir = dirLen > 1e-4 ? dir / dirLen : vec2(1.0, 0.0);
-    float pitch = max(v_Mark.w, 0.25);
+    float R = max(v_Mark.z, 0.1);
+    float wall = 1.0 - smoothstep(0.35, 0.8, abs(N.z));
 
-    float phase;
+    float coord;
     if (kind >= 3) {
-        phase = v_Mark.x / pitch;                        // Eintauchen/Bohren: konzentrische Ringe
+        coord = v_Mark.x;                                 // Eintauchen/Bohren: konzentrische Ringe
     } else if (kind == 2) {
-        phase = v_Mark.x / pitch;                        // Kugelfräser: Riefen quer zur Bahn
+        coord = v_Mark.x;                                 // Kugelfräser: Riefen quer zur Bahn
     } else {
-        float R = max(v_Mark.z, 0.1);
         float d = clamp(v_Mark.y, -R, R);
-        float wall = 1.0 - smoothstep(0.35, 0.8, abs(N.z));
-        // Boden: Bogenspur der Schneide; steile Wände: gerade Riefen
-        phase = (v_Mark.x - sqrt(max(R * R - d * d, 0.0)) * (1.0 - wall)) / pitch;
+        coord = v_Mark.x - sqrt(max(R * R - d * d, 0.0)) * (1.0 - wall); // Boden: Bogenspur, Wand: gerade Riefen
     }
 
-    float fade = clamp(1.0 - fwidth(phase) * 1.2, 0.0, 1.0) * clamp(cut, 0.0, 1.0);
-    float s = sin(phase * 2.0 * PI);
-    float c = cos(phase * 2.0 * PI);
+    float scale = max(v_Mark.w, 0.2);
+    float tilt = 0.0;
+    float shade = 0.0;
+    float weight = 1.0;
+    for (int o = 0; o < 3; ++o) {
+        float ph = coord / scale;
+        float fade = clamp(1.0 - fwidth(ph) * 1.4, 0.0, 1.0);
+        tilt += cos(ph * 2.0 * PI) * fade * weight;
+        shade += sin(ph * 2.0 * PI) * fade * weight;
+        scale *= 4.0;
+        weight *= 0.55;
+    }
+
+    // Absatz zwischen zwei Bahnen am Rand der letzten Bahn (Boden)
+    float edgeCoord = abs(v_Mark.y) / R;
+    float edge = smoothstep(0.78, 1.0, edgeCoord) * (1.0 - wall) * (kind <= 2 ? 1.0 : 0.0);
+    edge *= clamp(1.0 - fwidth(edgeCoord) * 3.0, 0.0, 1.0);
 
     vec3 T = vec3(dir, 0.0);
     T -= N * dot(T, N);
     float tLen = length(T);
-    if (tLen > 1e-4) {
-        N = normalize(N + (T / tLen) * c * 0.22 * fade);
-    }
-    roughOffset = (0.5 + 0.5 * s) * 0.15 * fade;
+    T = tLen > 1e-4 ? T / tLen : vec3(0.0);
+    vec3 B = vec3(-dir.y, dir.x, 0.0) * (v_Mark.y >= 0.0 ? 1.0 : -1.0);
+
+    N = normalize(N + (T * tilt * 0.14 + B * edge * 0.3) * cut);
+    roughOffset = (clamp(shade * 0.5 + 0.5, 0.0, 1.0) * 0.12 + edge * 0.15) * cut;
+    albedoShade = 1.0 + (shade * 0.035 - edge * 0.12) * cut;
     return N;
 }
 
@@ -296,14 +315,15 @@ void main() {
 
     float cut = clamp(v_MarkDir.z, 0.0, 1.0);
     float roughOffset;
-    N = applyToolMarks(N, cut, roughOffset);
+    float markShade;
+    N = applyToolMarks(N, cut, roughOffset, markShade);
 
     // Rohteiloberfläche leicht fleckig (Walzhaut / Sägeschnitt)
     float mottle = valueNoise(v_FragPos.xy * 0.35) * 0.6 + valueNoise(v_FragPos.xy * 1.7) * 0.4;
     vec3 rawAlbedo = uRawColor * (0.85 + 0.3 * mottle);
     float rawRough = clamp(uRawRoughness + (mottle - 0.5) * 0.15, 0.05, 1.0);
 
-    vec3 albedo = mix(rawAlbedo, uCutColor, cut);
+    vec3 albedo = mix(rawAlbedo, uCutColor, cut) * markShade;
     float metallic = mix(uRawMetallic, uCutMetallic, cut);
     float rough = clamp(mix(rawRough, uCutRoughness, cut) + roughOffset, 0.04, 1.0);
 
@@ -313,7 +333,7 @@ void main() {
 
     // Direktes Licht: Hauptlicht (mit Schatten), Fülllicht, Kantenlicht
     vec3 lightDirs[3] = vec3[3](L, normalize(vec3(-0.6, -0.35, 0.55)), normalize(vec3(0.0, 0.9, 0.35)));
-    float intensities[3] = float[3](2.6, 0.7, 0.5);
+    float intensities[3] = float[3](1.9, 0.45, 0.35);
     float shadow = shadowFactor(N, L);
     vec3 direct = vec3(0.0);
     for (int i = 0; i < 3; ++i) {
@@ -337,7 +357,7 @@ void main() {
     float ao = clamp(v_Ao, 0.0, 1.0);
     vec3 ambient = (specEnv + diffEnv) * ao * mix(0.55, 1.0, shadow);
 
-    vec3 color = direct + ambient;
+    vec3 color = (direct + ambient) * 0.85; // Belichtung
 
     // Filmisches Tonemapping (ACES-Näherung) und Gammakorrektur
     color = clamp((color * (2.51 * color + 0.03)) / (color * (2.43 * color + 0.59) + 0.14), 0.0, 1.0);

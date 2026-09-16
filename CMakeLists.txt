@@ -185,9 +185,15 @@ target_link_libraries(cnc_ui PUBLIC
     Qt6::Network
 )
 
-# Main Executable
+# Main Executable (Programmsymbol: resources/icons/app_icon.ico, Fenstersymbol über Qt-Ressource)
+set(GEMINICNC_APP_RESOURCES resources/app.qrc)
+if(WIN32)
+    enable_language(RC)
+    list(APPEND GEMINICNC_APP_RESOURCES resources/app.rc)
+endif()
 add_executable(GeminiCNC WIN32
     src/main.cpp
+    ${GEMINICNC_APP_RESOURCES}
 )
 target_link_libraries(GeminiCNC PRIVATE
     cnc_ui

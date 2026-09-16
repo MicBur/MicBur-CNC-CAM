@@ -18,12 +18,12 @@ struct MaterialLook {
 
 MaterialLook materialLook(int preset) {
     switch (preset) {
-        case 1:  return {{0.95f, 0.80f, 0.45f}, 1.0f, 0.25f, {0.72f, 0.58f, 0.32f}, 1.0f, 0.50f};  // Messing
-        case 2:  return {{0.62f, 0.63f, 0.64f}, 1.0f, 0.28f, {0.22f, 0.23f, 0.25f}, 0.45f, 0.70f}; // Stahl mit Walzhaut
+        case 1:  return {{0.85f, 0.68f, 0.36f}, 1.0f, 0.30f, {0.62f, 0.48f, 0.26f}, 1.0f, 0.55f};  // Messing
+        case 2:  return {{0.56f, 0.57f, 0.58f}, 1.0f, 0.34f, {0.20f, 0.21f, 0.23f}, 0.45f, 0.72f}; // Stahl mit Walzhaut
         case 3:  return {{0.55f, 0.38f, 0.22f}, 0.0f, 0.75f, {0.47f, 0.32f, 0.19f}, 0.0f, 0.85f};  // Holz
         case 4:  return {{0.92f, 0.92f, 0.90f}, 0.0f, 0.45f, {0.88f, 0.88f, 0.86f}, 0.0f, 0.55f};  // POM
-        case 5:  return {{0.72f, 0.70f, 0.67f}, 1.0f, 0.20f, {0.55f, 0.55f, 0.56f}, 1.0f, 0.42f};  // Edelstahl
-        default: return {{0.91f, 0.92f, 0.92f}, 1.0f, 0.22f, {0.76f, 0.77f, 0.78f}, 1.0f, 0.45f};  // Aluminium
+        case 5:  return {{0.64f, 0.62f, 0.60f}, 1.0f, 0.26f, {0.48f, 0.48f, 0.49f}, 1.0f, 0.48f};  // Edelstahl
+        default: return {{0.80f, 0.81f, 0.82f}, 1.0f, 0.30f, {0.60f, 0.61f, 0.62f}, 1.0f, 0.55f};  // Aluminium
     }
 }
 
@@ -278,7 +278,9 @@ void Viewport3D::renderGrid() {
 
     // Grid = Maschinenbett-Oberfläche: liegt an der Unterkante des Rohteils (Z_min)
     float gridZ = 0.0f;
-    if (!m_stockMesh.isEmpty() && m_stockMesh.boundingBox.isValid()) {
+    if (m_useDynamicStock && m_dynamicStockSource && m_dynamicStockSource->bounds.isValid()) {
+        gridZ = static_cast<float>(m_dynamicStockSource->bounds.minPoint.z);
+    } else if (!m_stockMesh.isEmpty() && m_stockMesh.boundingBox.isValid()) {
         gridZ = static_cast<float>(m_stockMesh.boundingBox.minPoint.z);
     }
 

@@ -65,6 +65,7 @@ void StockModel::reset() {
     layerHi = m_initialHi;
     cutColors.assign(n, 0);
     marks.assign(n, ToolMark{});
+    edgeHints.assign(n, EdgeHint{});
     heightField.assign(n, floorZ());
     for (size_t i = 0; i < n; ++i) {
         updateTop(i);
@@ -241,16 +242,21 @@ void StockModel::carveSegment(const Core::Vector3D& p0, const Core::Vector3D& p1
     if (marks.size() != n) {
         marks.assign(n, ToolMark{});
     }
+    if (edgeHints.size() != n) {
+        edgeHints.assign(n, EdgeHint{});
+    }
 
     const double dx = bounds.widthX() / (resX - 1);
     const double dy = bounds.depthY() / (resY - 1);
     if (dx <= 1e-6 || dy <= 1e-6) return;
 
-    // Bounding Box des abgefahrenen Zylinder-Segments (Kapsel)
-    double bbMinX = std::min(p0.x, p1.x) - radius;
-    double bbMaxX = std::max(p0.x, p1.x) + radius;
-    double bbMinY = std::min(p0.y, p1.y) - radius;
-    double bbMaxY = std::max(p0.y, p1.y) + radius;
+    // Bounding Box des abgefahrenen Zylinder-Segments (Kapsel) plus Randstreifen für die Kantenlage
+    const double edgeBand = 1.5 * std::max(dx, dy);
+    const double reach = radius + edgeBand;
+    double bbMinX = std::min(p0.x, p1.x) - reach;
+    double bbMaxX = std::max(p0.x, p1.x) + reach;
+    double bbMinY = std::min(p0.y, p1.y) - reach;
+    double bbMaxY = std::max(p0.y, p1.y) + reach;
 
     int minI = std::clamp(static_cast<int>((bbMinX - bounds.minPoint.x) / dx), 0, resX - 1);
     int maxI = std::clamp(static_cast<int>((bbMaxX - bounds.minPoint.x) / dx) + 1, 0, resX - 1);
@@ -279,11 +285,27 @@ void StockModel::carveSegment(const Core::Vector3D& p0, const Core::Vector3D& p1
             double nearestY = p0.y + t * segDy;
             double dX = px - nearestX;
             double dY = py - nearestY;
-            if (dX * dX + dY * dY > rSq) continue;
-
-            // Senkrechter Fräser: alles oberhalb der Werkzeugspitze wird entfernt
+            const double distSq = dX * dX + dY * dY;
             const float cutZf = static_cast<float>(p0.z + t * (p1.z - p0.z));
             const size_t idx = static_cast<size_t>(j) * resX + i;
+            EdgeHint& hint = edgeHints[idx];
+
+            if (distSq > rSq) {
+                // Stehengebliebener Punkt neben tieferem Schnitt: Abstand zur Schneidenbahn merken
+                const double dist = std::sqrt(distSq);
+                const uint8_t cnt = layerCount[idx];
+                if (dist <= reach && cnt > 0 && cutZf < layerHi[idx * kMaxLayers + cnt - 1] - 0.05f) {
+                    const float clear = static_cast<float>(dist - radius);
+                    if (clear < hint.outClear) {
+                        hint.outClear = clear;
+                        hint.outX = static_cast<float>(-dX / dist) * clear;
+                        hint.outY = static_cast<float>(-dY / dist) * clear;
+                    }
+                }
+                continue;
+            }
+
+            // Senkrechter Fräser: alles oberhalb der Werkzeugspitze wird entfernt
             uint8_t& count = layerCount[idx];
             bool changed = false;
             while (count > 0) {
@@ -301,6 +323,19 @@ void StockModel::carveSegment(const Core::Vector3D& p0, const Core::Vector3D& p1
             if (changed) {
                 updateTop(idx);
                 cutColors[idx] = colorRgba;
+            }
+
+            // Abgetragener Punkt: Abstand zum Fräserrand (Wandfuß) merken
+            {
+                const bool touching = count > 0 && layerHi[idx * kMaxLayers + count - 1] >= cutZf - 0.02f;
+                const double dist = std::sqrt(distSq);
+                const float depth = static_cast<float>(radius - dist);
+                if (changed) hint.outClear = 1e9f; // neue Oberkante: frühere Nachbarschnitte gelten nicht mehr
+                if (changed || (touching && depth > hint.inDepth)) {
+                    hint.inDepth = depth;
+                    hint.inX = dist > 1e-9 ? static_cast<float>(dX / dist) * depth : 0.0f;
+                    hint.inY = dist > 1e-9 ? static_cast<float>(dY / dist) * depth : 0.0f;
+                }
             }
 
             // Bearbeitungsspur merken: bei Abtrag oder wenn der Fräser die Fläche nur überstreicht (Schlichten)
@@ -352,11 +387,16 @@ StockModel::Surface StockModel::buildSurface() const {
     auto px = [&](int i) { return static_cast<float>(bounds.minPoint.x + i * dx); };
     auto py = [&](int j) { return static_cast<float>(bounds.minPoint.y + j * dy); };
 
+    // Höhensprung ab dem zwei Nachbarpunkte als Wand (nicht als Schräge) gelten
+    const float wallStep = std::max(0.3f, 1.2f * static_cast<float>(std::max(dx, dy)));
+
     // Glatte Normale aus den Nachbarhöhen derselben Schicht
     auto surfaceNormal = [&](int i, int j, int k, bool top, float& nx, float& ny, float& nz) {
         auto zAt = [&](int ii, int jj) { return top ? hi(ii, jj, k) : lo(ii, jj, k); };
-        const int il = has(i - 1, j, k) ? i - 1 : i, ir = has(i + 1, j, k) ? i + 1 : i;
-        const int jd = has(i, j - 1, k) ? j - 1 : j, ju = has(i, j + 1, k) ? j + 1 : j;
+        const float zc = zAt(i, j);
+        auto usable = [&](int ii, int jj) { return has(ii, jj, k) && std::abs(zAt(ii, jj) - zc) <= wallStep; };
+        const int il = usable(i - 1, j) ? i - 1 : i, ir = usable(i + 1, j) ? i + 1 : i;
+        const int jd = usable(i, j - 1) ? j - 1 : j, ju = usable(i, j + 1) ? j + 1 : j;
         const float dzdx = (ir != il) ? (zAt(ir, j) - zAt(il, j)) / static_cast<float>((ir - il) * dx) : 0.0f;
         const float dzdy = (ju != jd) ? (zAt(i, ju) - zAt(i, jd)) / static_cast<float>((ju - jd) * dy) : 0.0f;
         nx = top ? -dzdx : dzdx;
@@ -403,26 +443,80 @@ StockModel::Surface StockModel::buildSurface() const {
         return sh;
     };
 
+    // Lage eines Randpunkts auf der tatsächlichen Schneidenbahn (statt auf dem Raster)
+    const float maxShift = 0.95f * static_cast<float>(std::min(dx, dy));
+    const bool haveHints = edgeHints.size() == n;
+    auto vertexXY = [&](int i, int j, int k, bool top, float& x, float& y) {
+        x = px(i);
+        y = py(j);
+        if (!haveHints) return;
+        const size_t p = static_cast<size_t>(j) * resX + i;
+        if (k != layerCount[p] - 1) return;
+
+        float maxDrop = 0.0f;
+        float maxRise = 0.0f;
+        const float z = top ? hi(i, j, k) : lo(i, j, k);
+        for (int dj = -1; dj <= 1; ++dj) {
+            for (int di = -1; di <= 1; ++di) {
+                if (di == 0 && dj == 0) continue;
+                const int ii = i + di, jj = j + dj;
+                if (ii < 0 || jj < 0 || ii >= resX || jj >= resY) continue;
+                if (!has(ii, jj, k)) {
+                    maxDrop = 1e9f; // Durchbruch neben diesem Punkt
+                    continue;
+                }
+                if (!top) continue;
+                const float nz = hi(ii, jj, k);
+                maxDrop = std::max(maxDrop, z - nz);
+                maxRise = std::max(maxRise, nz - z);
+            }
+        }
+
+        const EdgeHint& h = edgeHints[p];
+        float sx = 0.0f, sy = 0.0f;
+        if (maxDrop > wallStep && maxDrop >= maxRise && h.outClear < 1e8f) {
+            sx = h.outX;
+            sy = h.outY;
+        } else if (top && maxRise > wallStep && h.inDepth >= 0.0f) {
+            sx = h.inX;
+            sy = h.inY;
+        } else {
+            return;
+        }
+        const float len = std::sqrt(sx * sx + sy * sy);
+        if (len > maxShift) {
+            sx *= maxShift / len;
+            sy *= maxShift / len;
+        }
+        x += sx;
+        y += sy;
+    };
+
     std::vector<uint32_t> topIdx(n * L, kNoVertex);
     std::vector<uint32_t> botIdx(n * L, kNoVertex);
 
+    auto topColor = [&](int i, int j, int k, float& r, float& g, float& b, float& a) {
+        const size_t p = static_cast<size_t>(j) * resX + i;
+        r = uncutR; g = uncutG; b = uncutB; a = uncutA;
+        if (k == layerCount[p] - 1 && p < cutColors.size() && cutColors[p] != 0) {
+            // Gefräste Stelle: Werkzeugfarbe (Standard: Signalgelb #FFE614)
+            const QColor c = QColor::fromRgba(cutColors[p]);
+            r = static_cast<float>(c.redF());
+            g = static_cast<float>(c.greenF());
+            b = static_cast<float>(c.blueF());
+            a = 1.0f;
+        }
+    };
     auto topVertex = [&](int i, int j, int k) -> uint32_t {
         const size_t p = static_cast<size_t>(j) * resX + i;
         uint32_t& slot = topIdx[p * L + k];
         if (slot == kNoVertex) {
-            float nx, ny, nz;
+            float nx, ny, nz, r, g, b, a, x, y;
             surfaceNormal(i, j, k, true, nx, ny, nz);
-            float r = uncutR, g = uncutG, b = uncutB, a = uncutA;
-            if (k == layerCount[p] - 1 && p < cutColors.size() && cutColors[p] != 0) {
-                // Gefräste Stelle: Werkzeugfarbe (Standard: Signalgelb #FFE614)
-                const QColor c = QColor::fromRgba(cutColors[p]);
-                r = static_cast<float>(c.redF());
-                g = static_cast<float>(c.greenF());
-                b = static_cast<float>(c.blueF());
-                a = 1.0f;
-            }
+            topColor(i, j, k, r, g, b, a);
+            vertexXY(i, j, k, true, x, y);
             slot = static_cast<uint32_t>(s.vertices.size());
-            s.vertices.push_back({px(i), py(j), hi(i, j, k), nx, ny, nz, r, g, b, a});
+            s.vertices.push_back({x, y, hi(i, j, k), nx, ny, nz, r, g, b, a});
             s.shading.push_back(shadingAt(i, j, k));
         }
         return slot;
@@ -431,10 +525,11 @@ StockModel::Surface StockModel::buildSurface() const {
         const size_t p = static_cast<size_t>(j) * resX + i;
         uint32_t& slot = botIdx[p * L + k];
         if (slot == kNoVertex) {
-            float nx, ny, nz;
+            float nx, ny, nz, x, y;
             surfaceNormal(i, j, k, false, nx, ny, nz);
+            vertexXY(i, j, k, false, x, y);
             slot = static_cast<uint32_t>(s.vertices.size());
-            s.vertices.push_back({px(i), py(j), lo(i, j, k), nx, ny, nz, botR, botG, botB, botA});
+            s.vertices.push_back({x, y, lo(i, j, k), nx, ny, nz, botR, botG, botB, botA});
             s.shading.push_back(VertexShading{});
         }
         return slot;
@@ -451,11 +546,33 @@ StockModel::Surface StockModel::buildSurface() const {
         const float ba = lo(ia, ja, k), bb = lo(ib, jb, k);
         if (ta - ba < kMinLayerThickness && tb - bb < kMinLayerThickness) return;
 
+        float xa, ya, xb, yb, xab, yab, xbb, ybb;
+        vertexXY(ia, ja, k, true, xa, ya);
+        vertexXY(ib, jb, k, true, xb, yb);
+        vertexXY(ia, ja, k, false, xab, yab);
+        vertexXY(ib, jb, k, false, xbb, ybb);
+
+        // Normale senkrecht zur (verschobenen) Wand, gleiche Seite wie die Rasternormale
+        float ex = xb - xa, ey = yb - ya;
+        float wnx = ey, wny = -ex;
+        const float wlen = std::sqrt(wnx * wnx + wny * wny);
+        if (wlen > 1e-6f) {
+            wnx /= wlen;
+            wny /= wlen;
+            if (wnx * nx + wny * ny < 0.0f) {
+                wnx = -wnx;
+                wny = -wny;
+            }
+        } else {
+            wnx = nx;
+            wny = ny;
+        }
+
         const uint32_t base = static_cast<uint32_t>(s.vertices.size());
-        s.vertices.push_back({px(ia), py(ja), ba, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
-        s.vertices.push_back({px(ib), py(jb), bb, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
-        s.vertices.push_back({px(ib), py(jb), tb, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
-        s.vertices.push_back({px(ia), py(ja), ta, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
+        s.vertices.push_back({xab, yab, ba, wnx, wny, 0.0f, sideR, sideG, sideB, sideA});
+        s.vertices.push_back({xbb, ybb, bb, wnx, wny, 0.0f, sideR, sideG, sideB, sideA});
+        s.vertices.push_back({xb, yb, tb, wnx, wny, 0.0f, sideR, sideG, sideB, sideA});
+        s.vertices.push_back({xa, ya, ta, wnx, wny, 0.0f, sideR, sideG, sideB, sideA});
 
         // Wandfuß stärker verdeckt als die Oberkante; Spuren wie am angrenzenden Punkt
         const VertexShading shA = shadingAt(ia, ja, k);
@@ -470,8 +587,8 @@ StockModel::Surface StockModel::buildSurface() const {
         s.shading.push_back(shA);
 
         // Umlaufsinn so wählen, dass die Dreiecksnormale nach außen zeigt
-        const float ex = px(ib) - px(ia);
-        const float ey = py(jb) - py(ja);
+        ex = px(ib) - px(ia);
+        ey = py(jb) - py(ja);
         if (ey * nx - ex * ny > 0.0f) {
             addTri(base, base + 1, base + 2);
             addTri(base, base + 2, base + 3);
@@ -481,15 +598,70 @@ StockModel::Surface StockModel::buildSurface() const {
         }
     };
 
+    // Steile Zelle (Fräswand zwischen Oberkante und Boden): eigene Eckpunkte mit Wandnormale,
+    // damit Oberseite und Boden scharfkantig bleiben
+    auto addSteepCell = [&](int i, int j, int k) {
+        const int ci[4] = {i, i + 1, i + 1, i};
+        const int cj[4] = {j, j, j + 1, j + 1};
+        float X[4], Y[4], Z[4];
+        for (int c = 0; c < 4; ++c) {
+            vertexXY(ci[c], cj[c], k, true, X[c], Y[c]);
+            Z[c] = hi(ci[c], cj[c], k);
+        }
+        // Flächennormale aus den Diagonalen (0→2, 1→3)
+        const float ax = X[2] - X[0], ay = Y[2] - Y[0], az = Z[2] - Z[0];
+        const float bx = X[3] - X[1], by = Y[3] - Y[1], bz = Z[3] - Z[1];
+        float nx = ay * bz - az * by;
+        float ny = az * bx - ax * bz;
+        float nz = ax * by - ay * bx;
+        float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (len < 1e-9f) { nx = 0.0f; ny = 0.0f; nz = 1.0f; len = 1.0f; }
+        // Richtung: vom hohen zum tiefen Rand (in die Tasche hinein)
+        const float gx = -((Z[1] + Z[2]) - (Z[0] + Z[3])) / static_cast<float>(2.0 * dx);
+        const float gy = -((Z[2] + Z[3]) - (Z[0] + Z[1])) / static_cast<float>(2.0 * dy);
+        if (nx * gx + ny * gy + nz < 0.0f) len = -len;
+        nx /= len; ny /= len; nz /= len;
+
+        const uint32_t base = static_cast<uint32_t>(s.vertices.size());
+        for (int c = 0; c < 4; ++c) {
+            float r, g, b, a;
+            topColor(ci[c], cj[c], k, r, g, b, a);
+            s.vertices.push_back({X[c], Y[c], Z[c], nx, ny, nz, r, g, b, a});
+            s.shading.push_back(shadingAt(ci[c], cj[c], k));
+        }
+        // Diagonale mit dem kleineren Höhenunterschied: Wand folgt der Kontur statt Zickzack
+        if (std::abs(Z[0] - Z[2]) <= std::abs(Z[1] - Z[3])) {
+            addTri(base, base + 1, base + 2);
+            addTri(base, base + 2, base + 3);
+        } else {
+            addTri(base, base + 1, base + 3);
+            addTri(base + 1, base + 2, base + 3);
+        }
+    };
+
     for (int k = 0; k < L; ++k) {
         for (int j = 0; j < resY - 1; ++j) {
             for (int i = 0; i < resX - 1; ++i) {
                 if (!cellDrawn(i, j, k)) continue;
 
-                const uint32_t t00 = topVertex(i, j, k), t10 = topVertex(i + 1, j, k);
-                const uint32_t t01 = topVertex(i, j + 1, k), t11 = topVertex(i + 1, j + 1, k);
-                addTri(t00, t10, t11);
-                addTri(t00, t11, t01);
+                const float z00 = hi(i, j, k), z10 = hi(i + 1, j, k);
+                const float z01 = hi(i, j + 1, k), z11 = hi(i + 1, j + 1, k);
+                const float zMin = std::min({z00, z10, z01, z11});
+                const float zMax = std::max({z00, z10, z01, z11});
+                if (zMax - zMin > wallStep) {
+                    addSteepCell(i, j, k);
+                } else {
+                    const uint32_t t00 = topVertex(i, j, k), t10 = topVertex(i + 1, j, k);
+                    const uint32_t t01 = topVertex(i, j + 1, k), t11 = topVertex(i + 1, j + 1, k);
+                    // Diagonale entlang der geringeren Höhenänderung (glattere Schrägen)
+                    if (std::abs(z00 - z11) <= std::abs(z10 - z01)) {
+                        addTri(t00, t10, t11);
+                        addTri(t00, t11, t01);
+                    } else {
+                        addTri(t00, t10, t01);
+                        addTri(t10, t11, t01);
+                    }
+                }
 
                 const uint32_t b00 = bottomVertex(i, j, k), b10 = bottomVertex(i + 1, j, k);
                 const uint32_t b01 = bottomVertex(i, j + 1, k), b11 = bottomVertex(i + 1, j + 1, k);
