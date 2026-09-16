@@ -201,68 +201,112 @@ Contour Contour::createSlot(double cx, double cy, double length, double width, d
     return c;
 }
 
+void Contour::applyStartDepth(std::vector<ContourSegment>& segments, double zStart, double zBottom) {
+    if (segments.empty() || segments.front().type != ContourSegmentType::StartPoint) return;
+
+    const double oldBottom = segments.front().z;
+    segments.front().zStart = zStart;
+    segments.front().z = zBottom;
+    for (size_t i = 1; i < segments.size(); ++i) {
+        if (std::abs(segments[i].z - oldBottom) < 1e-6) {
+            segments[i].z = zBottom;
+        }
+    }
+}
+
 Contour Contour::createFromSegments(const std::vector<ContourSegment>& segments, bool closeContour) {
+    return createFromSegments(segments, closeContour, nullptr);
+}
+
+Contour Contour::createFromSegments(const std::vector<ContourSegment>& segments, bool closeContour,
+                                    std::vector<double>* pointZ) {
     Contour c;
     c.isClosed = closeContour;
+    if (pointZ) pointZ->clear();
     if (segments.empty()) return c;
 
     double curX = 0.0;
     double curY = 0.0;
+    double curZ = 0.0;
+    auto addPt = [&c, pointZ](double x, double y, double z) {
+        c.addPoint(x, y);
+        if (pointZ) pointZ->push_back(z);
+    };
 
     for (const auto& seg : segments) {
         switch (seg.type) {
             case ContourSegmentType::StartPoint:
-                curX = seg.x;
-                curY = seg.y;
-                c.addPoint(curX, curY);
-                break;
             case ContourSegmentType::Line:
                 curX = seg.x;
                 curY = seg.y;
-                c.addPoint(curX, curY);
+                curZ = seg.z;
+                addPt(curX, curY, curZ);
                 break;
             case ContourSegmentType::ArcCW:
             case ContourSegmentType::ArcCCW: {
-                double targetX = seg.x;
-                double targetY = seg.y;
-                double r = std::max(0.1, std::abs(seg.radius));
-                double dx = targetX - curX;
-                double dy = targetY - curY;
-                double d = std::sqrt(dx * dx + dy * dy);
+                const bool cw = (seg.type == ContourSegmentType::ArcCW);
+                const double targetX = seg.x;
+                const double targetY = seg.y;
+                double centerX = 0.0;
+                double centerY = 0.0;
+                double r = 0.0;
 
-                if (d < 1e-4) break;
-                if (d > 2.0 * r) r = d * 0.5; // Absicherung
-
-                double midX = (curX + targetX) * 0.5;
-                double midY = (curY + targetY) * 0.5;
-                double h = std::sqrt(std::max(0.0, r * r - (d * 0.5) * (d * 0.5)));
-
-                double normX = -dy / d;
-                double normY = dx / d;
-                if (seg.type == ContourSegmentType::ArcCW) {
-                    normX = -normX;
-                    normY = -normY;
-                }
-
-                double centerX = midX + h * normX;
-                double centerY = midY + h * normY;
-
-                double startAngle = std::atan2(curY - centerY, curX - centerX);
-                double endAngle = std::atan2(targetY - centerY, targetX - centerX);
-
-                if (seg.type == ContourSegmentType::ArcCW) {
-                    if (endAngle > startAngle) endAngle -= 2.0 * M_PI;
+                if (seg.hasCenter) {
+                    // Mittelpunkt vorgegeben (Hurco: X/Y MITTELPUNKT)
+                    centerX = seg.centerX;
+                    centerY = seg.centerY;
+                    r = std::hypot(curX - centerX, curY - centerY);
+                    if (r < 1e-6) {
+                        curX = targetX;
+                        curY = targetY;
+                        curZ = seg.z;
+                        addPt(curX, curY, curZ);
+                        break;
+                    }
                 } else {
-                    if (endAngle < startAngle) endAngle += 2.0 * M_PI;
+                    // Nur Radius: kürzerer Bogen auf der Seite der Drehrichtung
+                    r = std::max(0.1, std::abs(seg.radius));
+                    const double dx = targetX - curX;
+                    const double dy = targetY - curY;
+                    const double d = std::hypot(dx, dy);
+                    if (d < 1e-4) break;
+                    if (d > 2.0 * r) r = d * 0.5; // Absicherung
+                    const double h = std::sqrt(std::max(0.0, r * r - 0.25 * d * d));
+                    double normX = -dy / d;
+                    double normY = dx / d;
+                    if (cw) {
+                        normX = -normX;
+                        normY = -normY;
+                    }
+                    centerX = 0.5 * (curX + targetX) + h * normX;
+                    centerY = 0.5 * (curY + targetY) + h * normY;
                 }
 
-                const int steps = 16;
+                const double startAngle = std::atan2(curY - centerY, curX - centerX);
+                double endAngle = std::atan2(targetY - centerY, targetX - centerX);
+                if (cw) {
+                    if (endAngle >= startAngle - 1e-12) endAngle -= 2.0 * M_PI;
+                } else {
+                    if (endAngle <= startAngle + 1e-12) endAngle += 2.0 * M_PI;
+                }
+
+                // Höchstens 10° je Teilstück; Tiefe linear über den Bogen
+                const double sweep = endAngle - startAngle;
+                const int steps = std::max(4, static_cast<int>(std::ceil(std::abs(sweep) / (M_PI / 18.0))));
+                const double zFrom = curZ;
                 for (int i = 1; i <= steps; ++i) {
-                    double a = startAngle + (endAngle - startAngle) * (static_cast<double>(i) / steps);
-                    c.addPoint(centerX + r * std::cos(a), centerY + r * std::sin(a));
+                    const double t = static_cast<double>(i) / steps;
+                    const double a = startAngle + sweep * t;
+                    const double z = zFrom + (seg.z - zFrom) * t;
+                    if (i == steps) {
+                        addPt(targetX, targetY, z);
+                    } else {
+                        addPt(centerX + r * std::cos(a), centerY + r * std::sin(a), z);
+                    }
                 }
                 curX = targetX;
                 curY = targetY;
+                curZ = seg.z;
                 break;
             }
             case ContourSegmentType::Chamfer:
@@ -282,6 +326,7 @@ Contour Contour::createFromSegments(const std::vector<ContourSegment>& segments,
         const auto& last = c.points.back();
         if (std::abs(first.x - last.x) < 1e-4 && std::abs(first.y - last.y) < 1e-4) {
             c.points.pop_back();
+            if (pointZ && !pointZ->empty()) pointZ->pop_back();
         }
     }
 

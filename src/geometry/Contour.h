@@ -38,6 +38,10 @@ struct ContourSegment {
     double pitch{0.0};    // Für Helix / Gewinde
     double angleDeg{0.0}; // Für Polar / Slot
     double length{0.0};
+    double zStart{0.0};   // Nur Segment 0 (START): Z START; z = Z UNTEN
+    double centerX{0.0};  // Kreisbogen: Mittelpunkt (wenn hasCenter)
+    double centerY{0.0};
+    bool hasCenter{false};
 };
 
 /**
@@ -84,6 +88,17 @@ public:
 
     // Baut eine Kontur aus Einzelsegmenten (Linien, Bögen, Fasen)
     [[nodiscard]] static Contour createFromSegments(const std::vector<ContourSegment>& segments, bool closeContour = true);
+
+    // Wie oben; pointZ erhält die Tiefe je Konturpunkt (Z ENDE der Segmente, in Bögen interpoliert)
+    [[nodiscard]] static Contour createFromSegments(const std::vector<ContourSegment>& segments, bool closeContour,
+                                                    std::vector<double>* pointZ);
+
+    /**
+     * @brief Setzt Z START / Z UNTEN von Segment 0 (Hurco: START-Segment).
+     * Folgesegmente, deren Z ENDE noch der bisherigen Tiefe entspricht, übernehmen die neue Tiefe;
+     * individuell geänderte Segmenttiefen bleiben erhalten.
+     */
+    static void applyStartDepth(std::vector<ContourSegment>& segments, double zStart, double zBottom);
 
     // Generiert 3D-Helix-Punkte für zirkulares Eintauchen oder Gewindefräsen
     [[nodiscard]] static std::vector<Core::Vector3D> createHelixPoints(double cx, double cy, double startZ, double targetZ, double radius, double pitch, int stepsPerTurn = 32);
