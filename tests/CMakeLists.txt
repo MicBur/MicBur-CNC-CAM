@@ -13,6 +13,7 @@ target_link_libraries(TestCamEngine PRIVATE
     cnc_core
     cnc_geometry
     cnc_cam
+    cnc_simulation
     Qt6::Core
 )
 add_test(NAME TestCamEngine COMMAND TestCamEngine)
