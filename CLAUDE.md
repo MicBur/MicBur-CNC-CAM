@@ -59,7 +59,8 @@ Nullpunkt G54–G59, `G43 H`. Klipper: keine Bögen/Zyklen, M3/M5-Makros, PAUSE 
 - Raster mit bis zu 4 Materialschichten je Punkt (`layerLo/layerHi`) → gekippte Teile, Überhänge, Durchbrüche. `initFromMesh` für STL-Rohteile.
 - `carveSegment` trägt als senkrechter Zylinder ab und merkt sich je Punkt die **Fräserspur** (`marks`: Richtung, Bahnkoordinaten, Vorschub/U)
   und die **genaue Kantenlage** (`edgeHints`), damit Radien und Schrägen glatt statt treppenförmig dargestellt werden.
-- `buildSurface()` wird gemeinsam für GPU und STL-Export genutzt (steile Zellen mit eigenen Eckpunkten, verschobene Randpunkte, Umgebungsverdeckung je Punkt).
+- `buildSurface()` wird gemeinsam für GPU und STL-Export genutzt: steile Zellen werden wie bei Marching Squares entlang der Schneidenbahn zerlegt
+  (Oberseite/Boden enden am Schnittpunkt, senkrechte Wand dazwischen), Umgebungsverdeckung je Punkt. Durchbruch-Wände sind noch rastergebunden.
 
 **Darstellung** (`Viewport3D` + Rohteil-Shader): Qualitätsschalter Schnell (Blinn-Phong) / Realistisch (PBR GGX, Werkstatt-Umgebung,
 Fräserspuren im Shader, ACES) / Realistisch + Schatten (Shadow-Map). Materialvorgaben Alu, Messing, Stahl, Holz, POM, Edelstahl.
@@ -70,13 +71,15 @@ Der GPU-Upload passiert in `paintGL`; danach VBO/IBO wieder lösen (andere Zeich
 - `packaging/build_release.ps1`: baut, testet, stellt mit `windeployqt` zusammen, erstellt
   `installer_build/MicBur-CNC-CAM_<Version>_Setup.exe` (Inno Setup, `installer.iss`, **ohne Administratorrechte**, Ziel `%LOCALAPPDATA%\Programs`)
   und `installer_build/MicBur-CNC-CAM_<Version>_Portable.zip` (mit `portable.txt` → Daten im Unterordner `daten`, für USB-Stick).
+- Sichtprüfung: `RenderPreview.exe <Ordner> [Auflösung] [Zoomschritte] [Fokus X] [Fokus Y]` – Nahansicht einer Stelle des Beispielteils.
 - Programmsymbol: `resources/icons/make_icon.py` erzeugt `app_icon.ico/.png`; eingebunden über `resources/app.rc` (exe) und `resources/app.qrc` (Fenster).
 - Die Programmdatei wird beim Paketieren von `GeminiCNC.exe` in `MicBur-CNC-CAM.exe` umbenannt. Organisations-/Programmname in `main.cpp`
   nicht ändern – sonst findet die installierte Version ihre gespeicherte Werkzeugbibliothek im AppData-Ordner nicht mehr.
 
 ## Arbeitsweise
 
-- Git: Arbeitszweig `feature/professional-cam-2026-09` (noch nicht nach `master` gemergt, nicht gepusht). Kleine, thematische Commits.
+- Git: https://github.com/MicBur/MicBur-CNC-CAM (öffentlich). Arbeitszweig `feature/professional-cam-2026-09`, `master` auf gleichem Stand.
+  Kleine, thematische Commits. Releases mit Setup.exe und Portable.zip unter „Releases“ (aktuell v1.1).
 - Neue Funktionen immer mit Test in `tests/` absichern; bestehende Tests müssen grün bleiben.
 - Der Benutzer testet über Screenshots aus der laufenden App und vergleicht mit WinMax-Screenshots.
 
