@@ -64,6 +64,7 @@ QJsonObject MachineConfig::toJson() const {
     obj[QStringLiteral("hasFourthAxis")] = hasFourthAxis;
     obj[QStringLiteral("controllerType")] = controllerType;
     obj[QStringLiteral("crcOutputMode")] = crcOutputMode;
+    obj[QStringLiteral("workOffset")] = workOffset;
 
     obj[QStringLiteral("driverX")] = driverX.toJson();
     obj[QStringLiteral("driverY")] = driverY.toJson();
@@ -100,6 +101,10 @@ MachineConfig MachineConfig::fromJson(const QJsonObject& json) {
     if (json.contains(QStringLiteral("hasFourthAxis"))) cfg.hasFourthAxis = json[QStringLiteral("hasFourthAxis")].toBool();
     if (json.contains(QStringLiteral("controllerType"))) cfg.controllerType = json[QStringLiteral("controllerType")].toInt();
     if (json.contains(QStringLiteral("crcOutputMode"))) cfg.crcOutputMode = json[QStringLiteral("crcOutputMode")].toInt();
+    if (json.contains(QStringLiteral("workOffset"))) {
+        const int offset = json[QStringLiteral("workOffset")].toInt();
+        cfg.workOffset = offset < 0 ? 0 : (offset > 5 ? 5 : offset);
+    }
 
     if (json.contains(QStringLiteral("driverX"))) cfg.driverX = TMC2209Config::fromJson(json[QStringLiteral("driverX")].toObject());
     if (json.contains(QStringLiteral("driverY"))) cfg.driverY = TMC2209Config::fromJson(json[QStringLiteral("driverY")].toObject());

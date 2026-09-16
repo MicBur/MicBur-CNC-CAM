@@ -65,6 +65,9 @@ public:
      */
     int crcOutputMode{0};
 
+    /** Nullpunktverschiebung im G-Code: 0 = G54, 1 = G55 … 5 = G59. */
+    int workOffset{0};
+
     // TMC2209 Treiberkonfiguration je Achse
     TMC2209Config driverX{900, 450, 16, true, true, 200};
     TMC2209Config driverY{900, 450, 16, true, true, 200};

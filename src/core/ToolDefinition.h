@@ -51,6 +51,11 @@ public:
 
     // Standard-Bibliothek generieren
     [[nodiscard]] static QList<ToolDefinition> createDefaultLibrary();
+
+    // Werkzeugbibliothek dauerhaft speichern/laden (JSON)
+    [[nodiscard]] static QString defaultLibraryPath();
+    [[nodiscard]] static bool saveLibrary(const QString& filePath, const QList<ToolDefinition>& tools, int activeToolId);
+    [[nodiscard]] static bool loadLibrary(const QString& filePath, QList<ToolDefinition>& tools, int& activeToolId);
 };
 
 } // namespace GeminiCNC::Core

@@ -1,5 +1,11 @@
 #include "ToolDefinition.h"
 #include <QJsonArray>
+#include <QJsonDocument>
+#include <QFile>
+#include <QFileInfo>
+#include <QSaveFile>
+#include <QDir>
+#include <QStandardPaths>
 
 namespace GeminiCNC::Core {
 
@@ -69,6 +75,53 @@ ToolDefinition ToolDefinition::fromJson(const QJsonObject& json) {
     if (json.contains(QStringLiteral("stepOverPercentage"))) tool.stepOverPercentage = json[QStringLiteral("stepOverPercentage")].toDouble();
     if (json.contains(QStringLiteral("color"))) tool.color = json[QStringLiteral("color")].toString();
     return tool;
+}
+
+QString ToolDefinition::defaultLibraryPath() {
+    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (dir.isEmpty()) {
+        dir = QDir::homePath() + QStringLiteral("/.geminicnc");
+    }
+    QDir().mkpath(dir);
+    return QDir(dir).filePath(QStringLiteral("werkzeuge.json"));
+}
+
+bool ToolDefinition::saveLibrary(const QString& filePath, const QList<ToolDefinition>& tools, int activeToolId) {
+    QJsonArray toolArray;
+    for (const auto& tool : tools) {
+        toolArray.append(tool.toJson());
+    }
+    QJsonObject root;
+    root[QStringLiteral("version")] = 1;
+    root[QStringLiteral("activeToolId")] = activeToolId;
+    root[QStringLiteral("tools")] = toolArray;
+
+    QDir().mkpath(QFileInfo(filePath).absolutePath());
+    // QSaveFile: erst vollständig schreiben, dann atomar ersetzen (kein halbes JSON bei Absturz)
+    QSaveFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly)) return false;
+    file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    return file.commit();
+}
+
+bool ToolDefinition::loadLibrary(const QString& filePath, QList<ToolDefinition>& tools, int& activeToolId) {
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) return false;
+
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) return false;
+
+    const QJsonObject root = doc.object();
+    QList<ToolDefinition> loaded;
+    for (const auto& value : root[QStringLiteral("tools")].toArray()) {
+        if (value.isObject()) loaded.append(fromJson(value.toObject()));
+    }
+    if (loaded.isEmpty()) return false;
+
+    tools = loaded;
+    activeToolId = root[QStringLiteral("activeToolId")].toInt(-1);
+    return true;
 }
 
 QList<ToolDefinition> ToolDefinition::createDefaultLibrary() {
