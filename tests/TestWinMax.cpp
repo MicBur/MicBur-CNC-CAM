@@ -13,6 +13,17 @@
 #include "hardware/MoonrakerClient.h"
 #include "geometry/ContourSolver.h"
 #include "ui/winmax/WinMaxSoftkeyBar.h"
+#include "ui/dialogs/ConversationalEditorDialog.h"
+#include <QUndoStack>
+#include <cstdlib>
+
+// assert() ist im Release-Build wirkungslos → harte Prüfung
+static void check(bool cond, const char* msg) {
+    if (!cond) {
+        std::cout << "FAILED: " << msg << std::endl;
+        std::exit(1);
+    }
+}
 
 using namespace GeminiCNC;
 
@@ -292,6 +303,50 @@ void testContourSolver() {
     std::cout << "testContourSolver PASSED!" << std::endl;
 }
 
+void testEditorUndoRedo() {
+    std::cout << "Running testEditorUndoRedo..." << std::endl;
+    UI::ConversationalEditorDialog editor;
+    auto* stack = editor.undoStack();
+    check(stack != nullptr && !stack->canUndo(), "Rückgängig-Verlauf muss nach dem Start leer sein");
+    const size_t initial = editor.program().size();
+
+    editor.onAddBlockClicked(CAM::BlockType::Drill);
+    check(editor.program().size() == initial + 1, "Block hinzufügen fehlgeschlagen");
+    check(stack->count() == 1, "Block hinzufügen muss genau ein Rückgängig-Schritt sein");
+
+    editor.onDuplicateClicked();
+    check(editor.program().size() == initial + 2 && stack->count() == 2, "Block kopieren muss ein eigener Schritt sein");
+
+    stack->undo();
+    check(editor.program().size() == initial + 1, "Rückgängig: Kopie muss entfernt werden");
+    stack->undo();
+    check(editor.program().size() == initial, "Rückgängig: hinzugefügter Block muss entfernt werden");
+    check(!stack->canUndo() && stack->canRedo(), "Nach zwei Schritten darf nichts mehr rückgängig zu machen sein");
+
+    stack->redo();
+    check(editor.program().size() == initial + 1 && editor.program()[initial].type == CAM::BlockType::Drill,
+          "Wiederholen muss den Bohrblock wiederherstellen");
+
+    // Verschieben rückgängig machen
+    const QString firstName = editor.program()[0].name;
+    editor.onBlockSelectionChanged(0);
+    editor.onMoveDownClicked();
+    check(editor.program()[1].name == firstName, "Block nach unten verschieben fehlgeschlagen");
+    stack->undo();
+    check(editor.program()[0].name == firstName, "Rückgängig: Verschieben muss zurückgenommen werden");
+
+    // Löschen rückgängig machen
+    const size_t beforeDelete = editor.program().size();
+    editor.onBlockSelectionChanged(0);
+    editor.onRemoveBlockClicked();
+    check(editor.program().size() == beforeDelete - 1, "Block löschen fehlgeschlagen");
+    stack->undo();
+    check(editor.program().size() == beforeDelete && editor.program()[0].name == firstName,
+          "Rückgängig: gelöschter Block muss zurückkommen");
+
+    std::cout << "testEditorUndoRedo PASSED!" << std::endl;
+}
+
 int main(int argc, char* argv[]) {
     qputenv("QT_PLUGIN_PATH", "G:/Qt/6.12.0/mingw_64/plugins");
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -322,6 +377,8 @@ int main(int argc, char* argv[]) {
 
     std::cout << "[8/8] Starting testWinMaxSoftkeys..." << std::endl << std::flush;
     testWinMaxSoftkeys();
+    std::cout << "[9/9] Starting testEditorUndoRedo..." << std::endl << std::flush;
+    testEditorUndoRedo();
 
     std::cout << "=== All WinMax Tests PASSED Successfully! ===" << std::endl << std::flush;
     return 0;

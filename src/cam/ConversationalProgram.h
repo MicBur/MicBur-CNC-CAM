@@ -37,6 +37,7 @@ public:
         const Core::BoundingBox& stockBounds,
         const Geometry::Mesh& partMesh = Geometry::Mesh()) const;
 
+    [[nodiscard]] QJsonObject toJson() const; // Programmstand wie in der .gprog-Datei
     [[nodiscard]] bool saveToFile(const QString& filePath) const;
     [[nodiscard]] static ConversationalProgram loadFromFile(const QString& filePath);
 

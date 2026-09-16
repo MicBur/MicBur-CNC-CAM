@@ -16,6 +16,8 @@
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QFormLayout>
+#include <QUndoStack>
+#include <QByteArray>
 
 #include "cam/ConversationalProgram.h"
 #include "core/ToolDefinition.h"
@@ -46,6 +48,10 @@ public:
 
     [[nodiscard]] const CAM::Toolpath& currentToolpath() const { return m_currentToolpath; }
     [[nodiscard]] const CAM::ConversationalProgram& program() const { return m_program; }
+
+    // Rückgängig / Wiederholen für den Arbeitsplan
+    [[nodiscard]] QUndoStack* undoStack() const { return m_undoStack; }
+    void restoreProgramState(const CAM::ConversationalProgram& state, int selectedIndex);
 
     // Datensatz-Editor: Direkte Segment-Aktionen (aufrufbar von WinMax Softkeys)
     void showSegmentEditor();
@@ -97,6 +103,17 @@ private:
     [[nodiscard]] QString blockListLabel(int index) const; // mit Einrückung innerhalb von Mustern
     void updatePatternFieldVisibility();
     void syncBlockDepthFromSegments(CAM::ConversationalBlock& b); // Z START / Z UNTEN von Segment 0 → Block
+
+    // Rückgängig: Programmstand nach einer Änderung als Schritt ablegen
+    struct UndoGroup; // fasst alle Änderungen einer Aktion zu einem Schritt zusammen
+    void recordUndoState(const QString& text, bool mergeable = false);
+    void resetUndoHistory();
+    QUndoStack* m_undoStack{nullptr};
+    CAM::ConversationalProgram m_undoSnapshot;
+    QByteArray m_undoSnapshotJson;
+    int m_undoSnapshotSelection{0};
+    int m_undoGroupDepth{0};
+    bool m_isRestoringUndo{false};
 
     CAM::ConversationalProgram m_program;
     int m_selectedBlockIndex{0};

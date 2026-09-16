@@ -313,6 +313,17 @@ Toolpath ConversationalProgram::generateFullToolpath(
     return fullTp;
 }
 
+QJsonObject ConversationalProgram::toJson() const {
+    QJsonObject root;
+    root[QStringLiteral("programName")] = programName;
+    QJsonArray blkArray;
+    for (const auto& b : blocks) {
+        blkArray.append(b.toJson());
+    }
+    root[QStringLiteral("blocks")] = blkArray;
+    return root;
+}
+
 bool ConversationalProgram::saveToFile(const QString& filePath) const {
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly)) return false;

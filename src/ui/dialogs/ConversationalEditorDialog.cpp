@@ -10,15 +10,93 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QScrollArea>
+#include <QUndoCommand>
+#include <QShortcut>
+#include <QKeySequence>
+#include <QElapsedTimer>
+#include <QJsonDocument>
 
 namespace GeminiCNC::UI {
+
+namespace {
+
+QByteArray programJson(const CAM::ConversationalProgram& program) {
+    return QJsonDocument(program.toJson()).toJson(QJsonDocument::Compact);
+}
+
+// Rückgängig-Schritt: vollständiger Programmstand vorher/nachher.
+// Schnell aufeinanderfolgende Eingaben im selben Block werden zu einem Schritt zusammengefasst.
+class ProgramStateCommand : public QUndoCommand {
+public:
+    ProgramStateCommand(ConversationalEditorDialog* editor,
+                        CAM::ConversationalProgram before, int beforeSelection,
+                        CAM::ConversationalProgram after, int afterSelection,
+                        const QString& text, bool mergeable)
+        : QUndoCommand(text), m_editor(editor), m_before(std::move(before)), m_after(std::move(after)),
+          m_beforeSelection(beforeSelection), m_afterSelection(afterSelection), m_mergeable(mergeable) {
+        m_lastChange.start();
+    }
+
+    int id() const override { return m_mergeable ? 0x4750 : -1; }
+
+    bool mergeWith(const QUndoCommand* other) override {
+        const auto* next = static_cast<const ProgramStateCommand*>(other);
+        if (next->m_afterSelection != m_afterSelection || m_lastChange.elapsed() > 1500) return false;
+        m_after = next->m_after;
+        setText(next->text());
+        m_lastChange.restart();
+        return true;
+    }
+
+    void undo() override { m_editor->restoreProgramState(m_before, m_beforeSelection); }
+
+    void redo() override {
+        if (m_skipFirstRedo) { // beim Anlegen ist der neue Stand bereits aktiv
+            m_skipFirstRedo = false;
+            return;
+        }
+        m_editor->restoreProgramState(m_after, m_afterSelection);
+    }
+
+private:
+    ConversationalEditorDialog* m_editor;
+    CAM::ConversationalProgram m_before;
+    CAM::ConversationalProgram m_after;
+    int m_beforeSelection;
+    int m_afterSelection;
+    bool m_mergeable;
+    bool m_skipFirstRedo{true};
+    QElapsedTimer m_lastChange;
+};
+
+} // namespace
+
+// Alle Programmänderungen innerhalb einer Aktion ergeben genau einen Rückgängig-Schritt
+struct ConversationalEditorDialog::UndoGroup {
+    UndoGroup(ConversationalEditorDialog* owner, QString label, bool mergeableStep = false)
+        : editor(owner), text(std::move(label)), mergeable(mergeableStep) {
+        ++editor->m_undoGroupDepth;
+    }
+    ~UndoGroup() {
+        if (--editor->m_undoGroupDepth == 0) editor->recordUndoState(text, mergeable);
+    }
+    UndoGroup(const UndoGroup&) = delete;
+    UndoGroup& operator=(const UndoGroup&) = delete;
+
+    ConversationalEditorDialog* editor;
+    QString text;
+    bool mergeable;
+};
 
 ConversationalEditorDialog::ConversationalEditorDialog(QWidget* parent) : QWidget(parent) {
     m_program = CAM::ConversationalProgram::createSampleProgram();
     m_toolLibrary = Core::ToolDefinition::createDefaultLibrary();
+    m_undoStack = new QUndoStack(this);
+    m_undoStack->setUndoLimit(100);
     setupUi();
     refreshBlockList();
     loadBlockToUi(0);
+    resetUndoHistory(); // Aufbau der Oberfläche ist kein Rückgängig-Schritt
 }
 
 void ConversationalEditorDialog::setToolLibrary(const QList<Core::ToolDefinition>& tools) {
@@ -147,6 +225,34 @@ void ConversationalEditorDialog::setupUi() {
     manageLayout->addWidget(btnDown);
     manageLayout->addWidget(btnDup);
     manageLayout->addWidget(btnDel);
+
+    // Rückgängig / Wiederholen (auch Strg+Z, Strg+Y, Strg+Umschalt+Z)
+    auto* btnUndo = new QPushButton(QStringLiteral("↶ Rückgängig"), this);
+    auto* btnRedo = new QPushButton(QStringLiteral("↷ Wiederholen"), this);
+    btnUndo->setEnabled(false);
+    btnRedo->setEnabled(false);
+    connect(btnUndo, &QPushButton::clicked, m_undoStack, &QUndoStack::undo);
+    connect(btnRedo, &QPushButton::clicked, m_undoStack, &QUndoStack::redo);
+    connect(m_undoStack, &QUndoStack::canUndoChanged, btnUndo, &QPushButton::setEnabled);
+    connect(m_undoStack, &QUndoStack::canRedoChanged, btnRedo, &QPushButton::setEnabled);
+    connect(m_undoStack, &QUndoStack::undoTextChanged, btnUndo, [btnUndo](const QString& text) {
+        btnUndo->setToolTip(text.isEmpty() ? QString() : QStringLiteral("Rückgängig: %1 (Strg+Z)").arg(text));
+    });
+    connect(m_undoStack, &QUndoStack::redoTextChanged, btnRedo, [btnRedo](const QString& text) {
+        btnRedo->setToolTip(text.isEmpty() ? QString() : QStringLiteral("Wiederholen: %1 (Strg+Y)").arg(text));
+    });
+    manageLayout->addWidget(btnUndo);
+    manageLayout->addWidget(btnRedo);
+
+    auto addShortcut = [this](const QKeySequence& keys, void (QUndoStack::*action)()) {
+        auto* shortcut = new QShortcut(keys, this);
+        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(shortcut, &QShortcut::activated, m_undoStack, action);
+    };
+    addShortcut(QKeySequence(Qt::CTRL | Qt::Key_Z), &QUndoStack::undo);
+    addShortcut(QKeySequence(Qt::CTRL | Qt::Key_Y), &QUndoStack::redo);
+    addShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z), &QUndoStack::redo);
+
     listLayout->addLayout(manageLayout);
 
     mainLayout->addWidget(listGroup);
@@ -1058,6 +1164,7 @@ void ConversationalEditorDialog::setupUi() {
     // Segment-Editor → Technologie (Werkzeug, Fräsart, Schnittwerte) in den Block übernehmen
     connect(m_segmentEditor, &ContourSegmentEditorDialog::technologyChanged, this,
             [this](int toolId, int contourSide, double feed, double plunge, double rpm, double stepDownValue) {
+        const UndoGroup undoGroup(this, QStringLiteral("Technologie ändern"), true);
         if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
         auto& b = m_program[m_selectedBlockIndex];
         if (toolId > 0) b.toolId = toolId;
@@ -1074,6 +1181,7 @@ void ConversationalEditorDialog::setupUi() {
 
     // Segment-Editor → Live-Kontur-Update → Toolpath senden
     connect(m_segmentEditor, &ContourSegmentEditorDialog::contourUpdated, this, [this](const Geometry::Contour& contour) {
+        const UndoGroup undoGroup(this, QStringLiteral("Kontur ändern"), true);
         if (m_selectedBlockIndex >= 0 && m_selectedBlockIndex < static_cast<int>(m_program.size())) {
             auto& b = m_program[m_selectedBlockIndex];
             if (m_segmentEditorMode == SegmentEditorMode::BlockContour) {
@@ -1103,6 +1211,7 @@ void ConversationalEditorDialog::setupUi() {
 
     // Segment-Editor → "Kontur übernehmen" → zurück zum Block-Editor
     connect(m_segmentEditor, &ContourSegmentEditorDialog::accepted, this, [this]() {
+        const UndoGroup undoGroup(this, QStringLiteral("Kontur übernehmen"));
         if (m_selectedBlockIndex >= 0 && m_selectedBlockIndex < static_cast<int>(m_program.size())) {
             auto& b = m_program[m_selectedBlockIndex];
             if (m_segmentEditorMode == SegmentEditorMode::BlockContour) {
@@ -1123,6 +1232,53 @@ void ConversationalEditorDialog::setupUi() {
     });
 
     m_masterStack->setCurrentIndex(0);
+}
+
+void ConversationalEditorDialog::recordUndoState(const QString& text, bool mergeable) {
+    if (m_isRestoringUndo || m_undoGroupDepth > 0 || !m_undoStack) return;
+    QByteArray json = programJson(m_program);
+    if (json == m_undoSnapshotJson) return; // nichts geändert
+
+    m_undoStack->push(new ProgramStateCommand(this, m_undoSnapshot, m_undoSnapshotSelection,
+                                              m_program, m_selectedBlockIndex, text, mergeable));
+    m_undoSnapshot = m_program;
+    m_undoSnapshotJson = std::move(json);
+    m_undoSnapshotSelection = m_selectedBlockIndex;
+}
+
+void ConversationalEditorDialog::resetUndoHistory() {
+    if (!m_undoStack) return;
+    m_undoStack->clear();
+    m_undoSnapshot = m_program;
+    m_undoSnapshotJson = programJson(m_program);
+    m_undoSnapshotSelection = m_selectedBlockIndex;
+}
+
+void ConversationalEditorDialog::restoreProgramState(const CAM::ConversationalProgram& state, int selectedIndex) {
+    m_isRestoringUndo = true;
+    m_program = state;
+    const int count = static_cast<int>(m_program.size());
+    m_selectedBlockIndex = count > 0 ? std::clamp(selectedIndex, 0, count - 1) : 0;
+    refreshBlockList();
+    if (count > 0) loadBlockToUi(m_selectedBlockIndex);
+
+    // Offener Kontur-Editor zeigt den wiederhergestellten Stand
+    if (m_masterStack && m_masterStack->currentIndex() == 1 && count > 0) {
+        const auto& b = m_program[m_selectedBlockIndex];
+        if (m_segmentEditorMode == SegmentEditorMode::BlockContour && !b.segments.empty()) {
+            m_segmentEditor->setSegments(b.segments);
+        } else if (m_segmentEditorMode == SegmentEditorMode::PocketIsland
+                   && m_editingIslandIndex >= 0 && m_editingIslandIndex < static_cast<int>(b.pocketIslands.size())) {
+            m_segmentEditor->setSegments(b.pocketIslands[m_editingIslandIndex]);
+        }
+    }
+
+    onCalculateProgramClicked(); // Vorschau und Simulation auf den wiederhergestellten Stand
+
+    m_undoSnapshot = m_program;
+    m_undoSnapshotJson = programJson(m_program);
+    m_undoSnapshotSelection = m_selectedBlockIndex;
+    m_isRestoringUndo = false;
 }
 
 void ConversationalEditorDialog::syncBlockDepthFromSegments(CAM::ConversationalBlock& b) {
@@ -1573,9 +1729,12 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
     if (item) {
         item->setText(blockListLabel(m_selectedBlockIndex));
     }
+
+    recordUndoState(QStringLiteral("Block %1 ändern").arg(m_selectedBlockIndex + 1), true);
 }
 
 void ConversationalEditorDialog::onAddBlockClicked(CAM::BlockType type) {
+    const UndoGroup undoGroup(this, QStringLiteral("%1 hinzufügen").arg(CAM::blockTypeToString(type)));
     int nextId = static_cast<int>(m_program.size()) + 1;
     QString name = QString("%1: %2").arg(nextId).arg(CAM::blockTypeToString(type));
     CAM::ConversationalBlock newBlock(nextId, type, name);
@@ -1599,6 +1758,7 @@ void ConversationalEditorDialog::onAddBlockClicked(CAM::BlockType type) {
 }
 
 void ConversationalEditorDialog::onRemoveBlockClicked() {
+    const UndoGroup undoGroup(this, QStringLiteral("Block löschen"));
     if (m_program.empty()) return;
     m_program.removeBlock(m_selectedBlockIndex);
     refreshBlockList();
@@ -1607,6 +1767,7 @@ void ConversationalEditorDialog::onRemoveBlockClicked() {
 }
 
 void ConversationalEditorDialog::onMoveUpClicked() {
+    const UndoGroup undoGroup(this, QStringLiteral("Block nach oben"));
     if (m_program.moveBlockUp(m_selectedBlockIndex)) {
         m_selectedBlockIndex--;
         refreshBlockList();
@@ -1614,6 +1775,7 @@ void ConversationalEditorDialog::onMoveUpClicked() {
 }
 
 void ConversationalEditorDialog::onMoveDownClicked() {
+    const UndoGroup undoGroup(this, QStringLiteral("Block nach unten"));
     if (m_program.moveBlockDown(m_selectedBlockIndex)) {
         m_selectedBlockIndex++;
         refreshBlockList();
@@ -1621,18 +1783,24 @@ void ConversationalEditorDialog::onMoveDownClicked() {
 }
 
 void ConversationalEditorDialog::onDuplicateClicked() {
+    const UndoGroup undoGroup(this, QStringLiteral("Block kopieren"));
     m_program.duplicateBlock(m_selectedBlockIndex);
     refreshBlockList();
 }
 
 void ConversationalEditorDialog::onBlockSelectionChanged(int row) {
     if (!m_isUpdatingUi && row >= 0) {
+        // Auswahl ohne Änderung: der nächste Rückgängig-Schritt kehrt zu diesem Block zurück
+        if (m_undoGroupDepth == 0 && !m_isRestoringUndo && programJson(m_program) == m_undoSnapshotJson) {
+            m_undoSnapshotSelection = row;
+        }
         loadBlockToUi(row);
     }
 }
 
 void ConversationalEditorDialog::onBlockItemChanged(QListWidgetItem* item) {
     if (m_isUpdatingUi || !item) return;
+    const UndoGroup undoGroup(this, QStringLiteral("Block aktivieren/deaktivieren"));
     int row = m_blockList->row(item);
     if (row >= 0 && row < static_cast<int>(m_program.size())) {
         m_program[row].enabled = (item->checkState() == Qt::Checked);
@@ -1684,6 +1852,7 @@ void ConversationalEditorDialog::onPickContourClicked() {
 
 void ConversationalEditorDialog::applyPickedContour(int index, const Geometry::Contour& contour) {
     Q_UNUSED(index);
+    const UndoGroup undoGroup(this, QStringLiteral("Kontur aus Zeichnung übernehmen"));
     if (m_selectedBlockIndex >= 0 && m_selectedBlockIndex < static_cast<int>(m_program.size())) {
         auto& b = m_program[m_selectedBlockIndex];
         b.contour = contour;
@@ -1761,6 +1930,7 @@ void ConversationalEditorDialog::onLoadProgramClicked() {
     m_selectedBlockIndex = 0;
     refreshBlockList();
     loadBlockToUi(0);
+    resetUndoHistory(); // neues Programm: kein Rückgängig in das vorherige
 }
 
 void ConversationalEditorDialog::onEditContourSegmentsClicked() {
@@ -1768,6 +1938,7 @@ void ConversationalEditorDialog::onEditContourSegmentsClicked() {
 }
 
 void ConversationalEditorDialog::onManageIslandsClicked() {
+    const UndoGroup undoGroup(this, QStringLiteral("Insel anlegen"));
     if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
     auto& b = m_program[m_selectedBlockIndex];
     
