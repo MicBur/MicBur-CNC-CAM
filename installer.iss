@@ -2,7 +2,8 @@
 AppName=MicBur-CNC-CAM
 AppVersion=1.0
 AppPublisher=Michael Burzlaff
-DefaultDirName={autopf}\MicBur-CNC-CAM
+PrivilegesRequired=lowest
+DefaultDirName={localappdata}\MicBur-CNC-CAM
 DefaultGroupName=MicBur-CNC-CAM
 OutputDir=g:\cnc\installer_build
 OutputBaseFilename=MicBur_CNC_CAM_Setup
@@ -10,6 +11,7 @@ Compression=lzma
 SolidCompression=yes
 SetupIconFile=g:\cnc\resources\icons\app_icon.ico
 UninstallDisplayIcon={app}\MicBur-CNC-CAM.exe
+WizardStyle=modern
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
