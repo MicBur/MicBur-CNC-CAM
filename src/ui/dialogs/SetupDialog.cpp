@@ -10,10 +10,20 @@
 #include <QFileDialog>
 #include <QMessageBox>
 
+#include <QScrollArea>
+
 namespace GeminiCNC::UI {
 
 SetupDialog::SetupDialog(QWidget* parent) : QWidget(parent) {
-    auto* mainLayout = new QVBoxLayout(this);
+    auto* outerLayout = new QVBoxLayout(this);
+    outerLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto* scrollArea = new QScrollArea(this);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+
+    auto* container = new QWidget(scrollArea);
+    auto* mainLayout = new QVBoxLayout(container);
     mainLayout->setContentsMargins(6, 6, 6, 6);
     mainLayout->setSpacing(10);
 
@@ -238,32 +248,59 @@ SetupDialog::SetupDialog(QWidget* parent) : QWidget(parent) {
     originRow->addWidget(m_spinOriginZ);
     alignLayout->addLayout(originRow);
 
+    // Nullpunktverschiebung für den G-Code (G54 … G59)
+    auto* wcsRow = new QHBoxLayout();
+    wcsRow->addWidget(new QLabel(QStringLiteral("Nullpunkt im G-Code:"), this));
+    m_cmbWorkOffset = new QComboBox(this);
+    m_cmbWorkOffset->addItems({QStringLiteral("G54"), QStringLiteral("G55"), QStringLiteral("G56"),
+                               QStringLiteral("G57"), QStringLiteral("G58"), QStringLiteral("G59")});
+    connect(m_cmbWorkOffset, &QComboBox::currentIndexChanged, this, [this](int index) {
+        m_machineConfig.workOffset = index;
+        emit machineConfigChanged(m_machineConfig);
+    });
+    wcsRow->addWidget(m_cmbWorkOffset, 1);
+    alignLayout->addLayout(wcsRow);
+
+    // Freier Rotationswinkel
+    auto* freeRotLayout = new QHBoxLayout();
+    auto* lblFreeRot = new QLabel(QStringLiteral("Winkel:"), this);
+    lblFreeRot->setStyleSheet("font-weight: bold;");
+    m_spinFreeAngle = new QDoubleSpinBox(this);
+    m_spinFreeAngle->setRange(-360.0, 360.0);
+    m_spinFreeAngle->setValue(90.0);
+    m_spinFreeAngle->setSuffix("°");
+    m_spinFreeAngle->setDecimals(1);
+    freeRotLayout->addWidget(lblFreeRot);
+    freeRotLayout->addWidget(m_spinFreeAngle, 1);
+    alignLayout->addLayout(freeRotLayout);
+
     auto* rotLayout = new QHBoxLayout();
-    auto* btnRotX = new QPushButton(QStringLiteral("↻ +90° X"), this);
-    auto* btnRotY = new QPushButton(QStringLiteral("↻ +90° Y"), this);
-    auto* btnRotZ = new QPushButton(QStringLiteral("↻ +90° Z"), this);
+    auto* btnRotX = new QPushButton(QStringLiteral("↻ X"), this);
+    auto* btnRotY = new QPushButton(QStringLiteral("↻ Y"), this);
+    auto* btnRotZ = new QPushButton(QStringLiteral("↻ Z"), this);
     QString rotStyle = "padding: 5px; background-color: #2C5282; color: white; border-radius: 4px; font-weight: bold;";
     btnRotX->setStyleSheet(rotStyle);
     btnRotY->setStyleSheet(rotStyle);
     btnRotZ->setStyleSheet(rotStyle);
 
+    // Rotation: BEIDE Meshes (Part + Stock) gemeinsam drehen
     connect(btnRotX, &QPushButton::clicked, this, [this]() {
-        if (!m_partMesh.isEmpty()) {
-            m_partMesh.rotateX(90.0, true);
-            onAlignOriginClicked();
-        }
+        double angle = m_spinFreeAngle->value();
+        if (!m_partMesh.isEmpty()) m_partMesh.rotateX(angle, true);
+        if (!m_stockMesh.isEmpty()) m_stockMesh.rotateX(angle, true);
+        onAlignOriginClicked();
     });
     connect(btnRotY, &QPushButton::clicked, this, [this]() {
-        if (!m_partMesh.isEmpty()) {
-            m_partMesh.rotateY(90.0, true);
-            onAlignOriginClicked();
-        }
+        double angle = m_spinFreeAngle->value();
+        if (!m_partMesh.isEmpty()) m_partMesh.rotateY(angle, true);
+        if (!m_stockMesh.isEmpty()) m_stockMesh.rotateY(angle, true);
+        onAlignOriginClicked();
     });
     connect(btnRotZ, &QPushButton::clicked, this, [this]() {
-        if (!m_partMesh.isEmpty()) {
-            m_partMesh.rotateZ(90.0, true);
-            onAlignOriginClicked();
-        }
+        double angle = m_spinFreeAngle->value();
+        if (!m_partMesh.isEmpty()) m_partMesh.rotateZ(angle, true);
+        if (!m_stockMesh.isEmpty()) m_stockMesh.rotateZ(angle, true);
+        onAlignOriginClicked();
     });
 
     rotLayout->addWidget(btnRotX);
@@ -378,6 +415,9 @@ SetupDialog::SetupDialog(QWidget* parent) : QWidget(parent) {
     // Initialen Standard-Rohteilquader erzeugen + CNC 6040 Preset laden
     onGenerateStockClicked();
     onMachinePresetChanged(0);
+    
+    scrollArea->setWidget(container);
+    outerLayout->addWidget(scrollArea);
 }
 
 void SetupDialog::onImportPartClicked() {
@@ -476,6 +516,16 @@ void SetupDialog::onAlignOriginClicked() {
     // Index 1-4, 6-9: Ecke (centerXY=false → minX=minY=0, dann Eckenshift)
     bool zeroTop = (ref < 5);
     bool centerXY = (ref == 0 || ref == 5);
+    
+    // Zylinder: Nullpunkt immer auf der Zylinderachsen-Mitte (CNC-Standard)
+    // Achse Z (stehend): XY zentriert
+    // Achse X (liegend): YZ zentriert  
+    // Achse Y (liegend): XZ zentriert
+    int cylAxis = -1; // -1 = kein Zylinder
+    if (m_cmbStockType->currentIndex() == 1) {
+        cylAxis = m_cmbCylAxis->currentIndex(); // 0=Z, 1=X, 2=Y
+        centerXY = true; // Immer XY zentrieren als Basis
+    }
 
     // Manueller Offset (G54-Verschiebung)
     double ox = m_spinOriginX->value();
@@ -484,6 +534,36 @@ void SetupDialog::onAlignOriginClicked() {
 
     auto alignMesh = [&](Geometry::Mesh& mesh) {
         if (mesh.isEmpty()) return;
+
+        if (cylAxis >= 0) {
+            // Zylinder-Spezialbehandlung: Immer auf Achsenmitte zentrieren
+            mesh.computeBoundingBox();
+            auto& bb = mesh.boundingBox;
+            double cx = (bb.minPoint.x + bb.maxPoint.x) * 0.5;
+            double cy = (bb.minPoint.y + bb.maxPoint.y) * 0.5;
+            double cz = (bb.minPoint.z + bb.maxPoint.z) * 0.5;
+            
+            double shiftX = 0, shiftY = 0, shiftZ = 0;
+            
+            if (cylAxis == 0) {
+                // Z-Achse (stehend): X=0 und Y=0 in der Mitte, Z nach Referenz
+                shiftX = -cx;
+                shiftY = -cy;
+                shiftZ = zeroTop ? -bb.maxPoint.z : -bb.minPoint.z;
+            } else if (cylAxis == 1) {
+                // X-Achse (liegend): Y=0 und Z=0 in der Mitte, X nach Referenz
+                shiftX = zeroTop ? -bb.maxPoint.x : -bb.minPoint.x;
+                shiftY = -cy;
+                shiftZ = -cz;
+            } else {
+                // Y-Achse (liegend): X=0 und Z=0 in der Mitte, Y nach Referenz
+                shiftX = -cx;
+                shiftY = zeroTop ? -bb.maxPoint.y : -bb.minPoint.y;
+                shiftZ = -cz;
+            }
+            
+            mesh.translate({shiftX, shiftY, shiftZ});
+        } else {
 
         // Basisausrichtung: alignToOrigin setzt je nach Modus
         // centerXY=false → minX=0, minY=0 (Vorne Links)
@@ -518,6 +598,7 @@ void SetupDialog::onAlignOriginClicked() {
             if (std::abs(shiftX) > 1e-6 || std::abs(shiftY) > 1e-6)
                 mesh.translate({shiftX, shiftY, 0.0});
         }
+        } // end else (non-cylinder)
 
         // Manuellen Offset anwenden
         if (std::abs(ox) > 1e-6 || std::abs(oy) > 1e-6 || std::abs(oz) > 1e-6)
@@ -560,7 +641,9 @@ void SetupDialog::onMachinePresetChanged(int index) {
     m_spinSpindleMax->setValue(preset.maxSpindleRpm);
     m_spinAccel->setValue(preset.maxAcceleration);
 
+    const int keptWorkOffset = m_machineConfig.workOffset; // Nullpunktwahl bleibt beim Maschinenwechsel
     m_machineConfig = preset;
+    m_machineConfig.workOffset = keptWorkOffset;
     m_isUpdatingMachineUi = false;
 
     emit machineConfigChanged(m_machineConfig);

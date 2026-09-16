@@ -15,6 +15,7 @@
 #include <QCheckBox>
 #include <QTableWidget>
 #include <QHeaderView>
+#include <QFormLayout>
 
 #include "cam/ConversationalProgram.h"
 #include "core/ToolDefinition.h"
@@ -58,7 +59,8 @@ public:
     [[nodiscard]] bool isSegmentEditorVisible() const;
 
 signals:
-    void toolpathGenerated(const CAM::Toolpath& toolpath);
+    void toolpathGenerated(const CAM::Toolpath& toolpath);   // Anzeige/Vorschau
+    void programCalculated(const CAM::Toolpath& toolpath);   // Gesamtprogramm neu berechnet → Simulation
     void pickingModeRequested(bool enabled);
     void promptChanged(const QString& promptText);
     void partMeshChanged(const Geometry::Mesh& mesh);
@@ -92,6 +94,9 @@ private:
     void setupUi();
     void refreshBlockList();
     void loadBlockToUi(int index);
+    [[nodiscard]] QString blockListLabel(int index) const; // mit Einrückung innerhalb von Mustern
+    void updatePatternFieldVisibility();
+    void syncBlockDepthFromSegments(CAM::ConversationalBlock& b); // Z START / Z UNTEN von Segment 0 → Block
 
     CAM::ConversationalProgram m_program;
     int m_selectedBlockIndex{0};
@@ -235,6 +240,21 @@ private:
 
     // ─── NC Seite ───
     QTextEdit* m_txtRawGCode{nullptr};
+
+    // ─── Muster Seite (Muster Start) ───
+    QFormLayout* m_patternForm{nullptr};
+    QComboBox* m_cmbPatternType{nullptr};
+    QSpinBox* m_spinPatternCountX{nullptr};
+    QSpinBox* m_spinPatternCountY{nullptr};
+    QDoubleSpinBox* m_spinPatternSpacingX{nullptr};
+    QDoubleSpinBox* m_spinPatternSpacingY{nullptr};
+    QDoubleSpinBox* m_spinPatternAngle{nullptr};
+    QDoubleSpinBox* m_spinPatternStepAngle{nullptr};
+    QDoubleSpinBox* m_spinPatternCenterX{nullptr};
+    QDoubleSpinBox* m_spinPatternCenterY{nullptr};
+    QCheckBox* m_chkPatternMirrorX{nullptr};
+    QCheckBox* m_chkPatternMirrorY{nullptr};
+    QLabel* m_lblPatternInfo{nullptr};
 
     // ─── 3D-STL Fräsen Seite ───
     QLabel* m_lblStlInfo{nullptr};

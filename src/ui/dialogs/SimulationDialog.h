@@ -35,6 +35,7 @@ private slots:
     void onStepClicked();
     void onSpeedSliderChanged(int value);
     void onExportGCodeClicked();
+    void onExportStockSTLClicked();
 
     void onEnginePositionChanged(const Core::Vector3D& pos);
     void onEngineStateChanged(Simulation::SimState state);
@@ -72,6 +73,7 @@ private:
     // PostProcessor-Auswahl
     QComboBox* m_cmbPostProcessor{nullptr};
     QPushButton* m_btnExportGCode{nullptr};
+    QPushButton* m_btnExportSTL{nullptr};
 };
 
 } // namespace GeminiCNC::UI

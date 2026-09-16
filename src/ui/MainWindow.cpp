@@ -271,7 +271,14 @@ void MainWindow::connectSignals() {
         m_viewport->setStockMesh(mesh);
         m_simWindow->setStockMesh(mesh);
         m_pageConversational->setStockMesh(mesh);
-        m_simEngine->setStockBounds(mesh.boundingBox);
+        if (m_pageSetup->stockType() >= 1) {
+            // Zylinder (jede Achse) und STL über das echte Mesh
+            m_simEngine->setMeshStock(mesh);
+        } else if (m_pageSetup->stockType() == 1) {
+            m_simEngine->setCylinderStock(mesh.boundingBox, m_pageSetup->stockCylinderRadius());
+        } else {
+            m_simEngine->setStockBounds(mesh.boundingBox);
+        }
         m_pageConversational->onCalculateProgramClicked();
     });
 
@@ -305,6 +312,14 @@ void MainWindow::connectSignals() {
     });
 
     // 2. Werkzeug-Events
+    // Bibliothek geändert (neu, gelöscht, bearbeitet) → alle Seiten mit Werkzeugauswahl aktualisieren
+    connect(m_pageToolManager, &ToolManagerDialog::toolLibraryChanged, this, [this](const QList<Core::ToolDefinition>& tools) {
+        m_pageConversational->setToolLibrary(tools);
+        m_pageSimulation->setToolLibrary(tools);
+        m_pageProbe->setToolLibrary(tools);
+        m_simEngine->setToolLibrary(tools);
+    });
+
     connect(m_pageToolManager, &ToolManagerDialog::activeToolChanged, this, [this](const Core::ToolDefinition& tool) {
         m_viewport->setActiveTool(tool);
         m_winmaxHeader->setActiveTool(tool);
@@ -319,10 +334,15 @@ void MainWindow::connectSignals() {
         m_simEngine->setActiveTool(tool);
     });
 
-    // 3. Conversational & Viewport Picking
+    // 3. Fräsbahn-Vorschau (Blockvorschau, Sichtbarkeit) – nur anzeigen, Simulation bleibt unangetastet,
+    //    sonst würde jedes Umschalten das bereits gefräste Rohteil löschen
     connect(m_pageConversational, &ConversationalEditorDialog::toolpathGenerated, this, [this](const CAM::Toolpath& tp) {
         m_viewport->setToolpath(tp);
         m_simWindow->setToolpath(tp);
+    });
+
+    // 3a. Gesamtprogramm neu berechnet → Simulation neu aufsetzen
+    connect(m_pageConversational, &ConversationalEditorDialog::programCalculated, this, [this](const CAM::Toolpath& tp) {
         m_pageSimulation->setToolpath(tp);
         m_pageSimulation->setToolLibrary(m_pageToolManager->toolList());
 
@@ -335,15 +355,28 @@ void MainWindow::connectSignals() {
             // Fallback: Toolpath-BBox verwenden wenn kein Stock definiert
             stockOnly = tp.boundingBox();
         }
-        if (stockOnly.isValid()) {
-            m_simEngine->setStockBounds(stockOnly);
+        if (m_pageSetup->stockType() >= 1 && !m_pageSetup->stockMesh().isEmpty()) {
+            m_simEngine->setMeshStock(m_pageSetup->stockMesh());
+        } else if (stockOnly.isValid()) {
+            if (m_pageSetup->stockType() == 1) {
+                m_simEngine->setCylinderStock(stockOnly, m_pageSetup->stockCylinderRadius());
+            } else {
+                m_simEngine->setStockBounds(stockOnly);
+            }
         }
 
+        // Tool-Library an SimEngine übergeben für automatischen Werkzeugwechsel
+        m_simEngine->setToolLibrary(m_pageToolManager->toolList());
         m_simEngine->setToolpath(tp);
-        m_simEngine->reset();
         if (m_simBlockInfo) {
             m_simBlockInfo->setText(QString("Satz: 0 / %1").arg(tp.size()));
         }
+    });
+
+    // 3b. SimEngine Werkzeugwechsel → Viewport + Header synchronisieren
+    connect(m_simEngine.get(), &Simulation::SimulationEngine::activeToolChanged, this, [this](const Core::ToolDefinition& tool) {
+        m_viewport->setActiveTool(tool);
+        m_winmaxHeader->setActiveTool(tool);
     });
 
     connect(m_pageConversational, &ConversationalEditorDialog::pickingModeRequested, this, [this](bool enabled) {
@@ -417,12 +450,25 @@ void MainWindow::connectSignals() {
     });
 
     // Initiales aktives Werkzeug synchronisieren
+    // Gespeicherte Werkzeugbibliothek an alle Seiten verteilen
+    const auto& library = m_pageToolManager->toolList();
+    m_pageConversational->setToolLibrary(library);
+    m_pageSimulation->setToolLibrary(library);
+    m_pageProbe->setToolLibrary(library);
+    m_simEngine->setToolLibrary(library);
+
     auto initialTool = m_pageToolManager->activeTool();
     m_viewport->setActiveTool(initialTool);
     m_winmaxHeader->setActiveTool(initialTool);
     m_pageProbe->setActiveTool(initialTool);
     m_simEngine->setActiveTool(initialTool);
-    m_simEngine->setStockBounds(m_pageSetup->stockMesh().boundingBox);
+    if (m_pageSetup->stockType() >= 1) {
+        m_simEngine->setMeshStock(m_pageSetup->stockMesh());
+    } else if (m_pageSetup->stockType() == 1) {
+        m_simEngine->setCylinderStock(m_pageSetup->stockMesh().boundingBox, m_pageSetup->stockCylinderRadius());
+    } else {
+        m_simEngine->setStockBounds(m_pageSetup->stockMesh().boundingBox);
+    }
 
     // Initiales Programm berechnen und Werkzeugwege laden
     m_pageConversational->onCalculateProgramClicked();

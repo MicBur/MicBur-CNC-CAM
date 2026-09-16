@@ -26,6 +26,8 @@ public:
     [[nodiscard]] const Geometry::Mesh& partMesh() const { return m_partMesh; }
     [[nodiscard]] const std::vector<Geometry::Contour>& contours() const { return m_contours; }
     [[nodiscard]] const Core::MachineConfig& machineConfig() const { return m_machineConfig; }
+    [[nodiscard]] int stockType() const { return m_cmbStockType ? m_cmbStockType->currentIndex() : 0; }
+    [[nodiscard]] double stockCylinderRadius() const { return m_spinStockRadius ? m_spinStockRadius->value() : 0.0; }
 
 signals:
     void stockMeshChanged(const Geometry::Mesh& mesh);
@@ -53,6 +55,7 @@ private:
     std::vector<Geometry::Contour> m_contours;
     Core::MachineConfig m_machineConfig;
     bool m_isUpdatingMachineUi{false};
+    QComboBox* m_cmbWorkOffset{nullptr}; // G54 … G59
 
     // ─── Bauteil ───
     QLabel* m_lblPartInfo{nullptr};
@@ -82,6 +85,7 @@ private:
     QDoubleSpinBox* m_spinOriginX{nullptr};
     QDoubleSpinBox* m_spinOriginY{nullptr};
     QDoubleSpinBox* m_spinOriginZ{nullptr};
+    QDoubleSpinBox* m_spinFreeAngle{nullptr};
 
     // ─── Maschinenparameter ───
     QComboBox* m_cmbMachinePreset{nullptr};

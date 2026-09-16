@@ -9,6 +9,7 @@
 #include <QGroupBox>
 #include <QFileDialog>
 #include <QMessageBox>
+#include <QScrollArea>
 
 namespace GeminiCNC::UI {
 
@@ -22,15 +23,21 @@ ConversationalEditorDialog::ConversationalEditorDialog(QWidget* parent) : QWidge
 
 void ConversationalEditorDialog::setToolLibrary(const QList<Core::ToolDefinition>& tools) {
     m_toolLibrary = tools;
+
+    // Auswahllisten neu aufbauen, ohne dass clear()/addItem() den Block speichern
+    // oder dessen Schnittwerte neu berechnen (würde Vorschub/Drehzahl überschreiben)
+    m_isUpdatingUi = true;
     m_cmbTool->clear();
     if (m_cmbFinishTool) m_cmbFinishTool->clear();
     if (m_cmbFinishTool) m_cmbFinishTool->addItem("Wie Schruppwerkzeug", -1);
-    
+
     for (const auto& t : m_toolLibrary) {
         QString text = QString("T%1: %2 (Ø %3mm)").arg(t.id).arg(t.name).arg(t.diameter, 0, 'f', 1);
         m_cmbTool->addItem(text, t.id);
         if (m_cmbFinishTool) m_cmbFinishTool->addItem(text, t.id);
     }
+    if (m_segmentEditor) m_segmentEditor->setToolLibrary(m_toolLibrary);
+    m_isUpdatingUi = false;
     loadBlockToUi(m_selectedBlockIndex);
 }
 
@@ -109,6 +116,8 @@ void ConversationalEditorDialog::setupUi() {
     makeAddBtn("+ Bohren", CAM::BlockType::Drill, "#6B46C1");
     makeAddBtn("+ 3D-STL", CAM::BlockType::Stl3D, "#9F7AEA");
     makeAddBtn("+ NC", CAM::BlockType::RawNC, "#4A5568");
+    makeAddBtn("+ Muster", CAM::BlockType::PatternStart, "#B7791F");
+    makeAddBtn("Muster Ende", CAM::BlockType::PatternEnd, "#744210");
     mainLayout->addLayout(topBtnLayout);
 
     // 2. Arbeitsplan Block-Liste & Steuerknöpfe
@@ -817,6 +826,94 @@ void ConversationalEditorDialog::setupUi() {
 
     m_stackParams->addWidget(pageStl); // Index 7
 
+    // ════════════════════════════════════════════
+    // Seite 8: Muster Start
+    // ════════════════════════════════════════════
+    auto* pagePattern = new QWidget(this);
+    m_patternForm = new QFormLayout(pagePattern);
+    m_patternForm->setSpacing(6);
+
+    m_cmbPatternType = new QComboBox(this);
+    m_cmbPatternType->addItems({
+        QStringLiteral("Linear (Reihe)"),
+        QStringLiteral("Raster (Spalten × Zeilen)"),
+        QStringLiteral("Kreis (Drehen um Zentrum)"),
+        QStringLiteral("Spiegeln")
+    });
+    connect(m_cmbPatternType, &QComboBox::currentIndexChanged, this, [this]() {
+        saveCurrentBlockFromUi();
+        updatePatternFieldVisibility();
+    });
+    m_patternForm->addRow(QStringLiteral("Musterart:"), m_cmbPatternType);
+
+    auto makePatternCount = [this](int val) {
+        auto* sp = new QSpinBox(this);
+        sp->setRange(1, 500);
+        sp->setValue(val);
+        connect(sp, &QSpinBox::valueChanged, this, [this]() {
+            saveCurrentBlockFromUi();
+            updatePatternFieldVisibility();
+        });
+        return sp;
+    };
+    m_spinPatternCountX = makePatternCount(3);
+    m_patternForm->addRow(QStringLiteral("Anzahl:"), m_spinPatternCountX);
+    m_spinPatternCountY = makePatternCount(2);
+    m_patternForm->addRow(QStringLiteral("Zeilen (Y):"), m_spinPatternCountY);
+
+    m_spinPatternSpacingX = makeSpinMM(-2000, 2000, 20);
+    m_patternForm->addRow(QStringLiteral("Abstand:"), m_spinPatternSpacingX);
+    m_spinPatternSpacingY = makeSpinMM(-2000, 2000, 20);
+    m_patternForm->addRow(QStringLiteral("Abstand Y:"), m_spinPatternSpacingY);
+
+    m_spinPatternAngle = makeSpinMM(-360, 360, 0);
+    m_spinPatternAngle->setSuffix("°");
+    m_spinPatternAngle->setDecimals(2);
+    m_patternForm->addRow(QStringLiteral("Richtung:"), m_spinPatternAngle);
+
+    m_spinPatternStepAngle = makeSpinMM(-360, 360, 0);
+    m_spinPatternStepAngle->setSuffix("°");
+    m_spinPatternStepAngle->setDecimals(2);
+    m_spinPatternStepAngle->setToolTip(QStringLiteral("0° = gleichmäßig auf 360° verteilt"));
+    m_patternForm->addRow(QStringLiteral("Winkelschritt:"), m_spinPatternStepAngle);
+
+    m_spinPatternCenterX = makeSpinMM(-2000, 2000, 0);
+    m_patternForm->addRow(QStringLiteral("Zentrum X:"), m_spinPatternCenterX);
+    m_spinPatternCenterY = makeSpinMM(-2000, 2000, 0);
+    m_patternForm->addRow(QStringLiteral("Zentrum Y:"), m_spinPatternCenterY);
+
+    m_chkPatternMirrorX = new QCheckBox(QStringLiteral("An senkrechter Achse spiegeln (X → −X)"), this);
+    m_chkPatternMirrorX->setChecked(true);
+    m_chkPatternMirrorY = new QCheckBox(QStringLiteral("An waagrechter Achse spiegeln (Y → −Y)"), this);
+    for (auto* chk : {m_chkPatternMirrorX, m_chkPatternMirrorY}) {
+        connect(chk, &QCheckBox::toggled, this, [this]() {
+            saveCurrentBlockFromUi();
+            updatePatternFieldVisibility();
+        });
+    }
+    m_patternForm->addRow(QString(), m_chkPatternMirrorX);
+    m_patternForm->addRow(QString(), m_chkPatternMirrorY);
+
+    m_lblPatternInfo = new QLabel(this);
+    m_lblPatternInfo->setWordWrap(true);
+    m_lblPatternInfo->setStyleSheet("color: #F6E05E; font-weight: bold;");
+    m_patternForm->addRow(m_lblPatternInfo);
+
+    m_stackParams->addWidget(pagePattern); // Index 8
+
+    // ════════════════════════════════════════════
+    // Seite 9: Muster Ende
+    // ════════════════════════════════════════════
+    auto* pagePatternEnd = new QWidget(this);
+    auto* lPatternEnd = new QVBoxLayout(pagePatternEnd);
+    auto* lblPatternEnd = new QLabel(QStringLiteral(
+        "Schließt das zuletzt geöffnete Muster.\n"
+        "Alle Blöcke zwischen „Muster Start“ und diesem Block werden je Musterposition wiederholt."), this);
+    lblPatternEnd->setWordWrap(true);
+    lPatternEnd->addWidget(lblPatternEnd);
+    lPatternEnd->addStretch(1);
+    m_stackParams->addWidget(pagePatternEnd); // Index 9
+
     detailLayout->addWidget(m_stackParams);
 
     // ─── Untere Technologie-Tabs (Hurco WinMax Vorbild) ───
@@ -915,13 +1012,19 @@ void ConversationalEditorDialog::setupUi() {
     m_techTabWidget->addTab(tabMat, QStringLiteral("WERKSTOFF (MATERIAL)"));
 
     detailLayout->addWidget(m_techTabWidget);
-    mainLayout->addWidget(detailGroup);
+
+    // Wrap detail + action area in a scroll container
+    auto* scrollContent = new QWidget(this);
+    auto* scrollLayout = new QVBoxLayout(scrollContent);
+    scrollLayout->setContentsMargins(0, 0, 0, 0);
+    scrollLayout->setSpacing(6);
+    scrollLayout->addWidget(detailGroup);
 
     // 5. Haupt-Aktion: Gesamtprogramm berechnen
     auto* btnCalcProg = new QPushButton(QStringLiteral("⚡ Gesamtprogramm berechnen (Alle Blöcke)"), this);
     btnCalcProg->setStyleSheet("padding: 10px; font-weight: bold; background-color: #DD6B20; color: white; border-radius: 4px; font-size: 13px;");
     connect(btnCalcProg, &QPushButton::clicked, this, &ConversationalEditorDialog::onCalculateProgramClicked);
-    mainLayout->addWidget(btnCalcProg);
+    scrollLayout->addWidget(btnCalcProg);
 
     auto* progFileLayout = new QHBoxLayout();
     auto* btnSaveProg = new QPushButton(QStringLiteral("💾 Programm speichern (.gprog)"), this);
@@ -930,20 +1033,43 @@ void ConversationalEditorDialog::setupUi() {
     connect(btnLoadProg, &QPushButton::clicked, this, &ConversationalEditorDialog::onLoadProgramClicked);
     progFileLayout->addWidget(btnSaveProg);
     progFileLayout->addWidget(btnLoadProg);
-    mainLayout->addLayout(progFileLayout);
+    scrollLayout->addLayout(progFileLayout);
 
     m_lblProgramSummary = new QLabel(QStringLiteral("Keine Fräsbahnen berechnet."), this);
     m_lblProgramSummary->setStyleSheet("background-color: #1A202C; padding: 6px; border-radius: 4px; color: #CBD5E0; font-family: Consolas, monospace;");
     m_lblProgramSummary->setWordWrap(true);
-    mainLayout->addWidget(m_lblProgramSummary);
+    scrollLayout->addWidget(m_lblProgramSummary);
 
-    mainLayout->addStretch(1);
+    scrollLayout->addStretch(1);
+
+    auto* scrollArea = new QScrollArea(this);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setWidget(scrollContent);
+    mainLayout->addWidget(scrollArea, 1);
 
     // ──── Master-Stack befüllen ────
     m_masterStack->addWidget(m_blockEditorPage);  // Index 0: Block-Editor
 
     // ──── SEITE 1: Hurco WinMax Datensatz-Editor ────
     m_segmentEditor = new ContourSegmentEditorDialog(this);
+    m_segmentEditor->setToolLibrary(m_toolLibrary);
+
+    // Segment-Editor → Technologie (Werkzeug, Fräsart, Schnittwerte) in den Block übernehmen
+    connect(m_segmentEditor, &ContourSegmentEditorDialog::technologyChanged, this,
+            [this](int toolId, int contourSide, double feed, double plunge, double rpm, double stepDownValue) {
+        if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+        auto& b = m_program[m_selectedBlockIndex];
+        if (toolId > 0) b.toolId = toolId;
+        if (m_segmentEditorMode == SegmentEditorMode::BlockContour) {
+            b.contourSide = static_cast<CAM::ContourSide>(contourSide);
+        }
+        b.feedRate = feed;
+        b.plungeFeedRate = plunge;
+        b.spindleRpm = rpm;
+        b.stepDown = stepDownValue;
+        loadBlockToUi(m_selectedBlockIndex); // Block-Editor nachführen
+    });
     m_masterStack->addWidget(m_segmentEditor);     // Index 1: Segment-Datensatz-Editor
 
     // Segment-Editor → Live-Kontur-Update → Toolpath senden
@@ -953,6 +1079,7 @@ void ConversationalEditorDialog::setupUi() {
             if (m_segmentEditorMode == SegmentEditorMode::BlockContour) {
                 b.contour = contour;
                 b.segments = m_segmentEditor->segments();
+                syncBlockDepthFromSegments(b);
             } else if (m_segmentEditorMode == SegmentEditorMode::PocketIsland) {
                 // Live preview of island could be sent here, but for now we just update the data
                 if (m_editingIslandIndex >= 0 && m_editingIslandIndex < static_cast<int>(b.pocketIslands.size())) {
@@ -981,6 +1108,7 @@ void ConversationalEditorDialog::setupUi() {
             if (m_segmentEditorMode == SegmentEditorMode::BlockContour) {
                 b.segments = m_segmentEditor->segments();
                 b.contour = m_segmentEditor->compiledContour();
+                syncBlockDepthFromSegments(b);
                 m_lblContourStatus->setText(QString("%1 Schritte (%2 Pkt)").arg(b.segments.size()).arg(b.contour.points.size()));
             } else if (m_segmentEditorMode == SegmentEditorMode::PocketIsland) {
                 if (m_editingIslandIndex >= 0 && m_editingIslandIndex < static_cast<int>(b.pocketIslands.size())) {
@@ -997,6 +1125,73 @@ void ConversationalEditorDialog::setupUi() {
     m_masterStack->setCurrentIndex(0);
 }
 
+void ConversationalEditorDialog::syncBlockDepthFromSegments(CAM::ConversationalBlock& b) {
+    if (b.segments.empty() || b.segments.front().type != Geometry::ContourSegmentType::StartPoint) return;
+    b.startZ = b.segments.front().zStart;
+    b.targetZ = b.segments.front().z;
+
+    // Z-Felder des Blocks nachführen, ohne erneut zu speichern
+    const bool wasUpdating = m_isUpdatingUi;
+    m_isUpdatingUi = true;
+    m_spinStartZ->setValue(b.startZ);
+    m_spinTargetZ->setValue(b.targetZ);
+    m_isUpdatingUi = wasUpdating;
+}
+
+QString ConversationalEditorDialog::blockListLabel(int index) const {
+    // Verschachtelungstiefe: Blöcke zwischen Muster Start und Muster Ende eingerückt
+    int depth = 0;
+    for (int i = 0; i < index; ++i) {
+        if (m_program[i].type == CAM::BlockType::PatternStart) ++depth;
+        else if (m_program[i].type == CAM::BlockType::PatternEnd && depth > 0) --depth;
+    }
+    const auto& b = m_program[index];
+    if (b.type == CAM::BlockType::PatternEnd && depth > 0) --depth;
+
+    return QString("%1[%2] %3")
+        .arg(QStringLiteral("│   ").repeated(depth))
+        .arg(CAM::blockTypeToString(b.type))
+        .arg(b.name);
+}
+
+void ConversationalEditorDialog::updatePatternFieldVisibility() {
+    if (!m_patternForm || !m_cmbPatternType) return;
+    const auto type = static_cast<CAM::PatternType>(m_cmbPatternType->currentIndex());
+    const bool linear = (type == CAM::PatternType::Linear);
+    const bool rect = (type == CAM::PatternType::Rectangular);
+    const bool circ = (type == CAM::PatternType::Circular);
+    const bool mirror = (type == CAM::PatternType::Mirror);
+
+    auto setLabel = [this](QWidget* field, const QString& text) {
+        if (auto* lbl = qobject_cast<QLabel*>(m_patternForm->labelForField(field))) lbl->setText(text);
+    };
+
+    m_patternForm->setRowVisible(m_spinPatternCountX, !mirror);
+    m_patternForm->setRowVisible(m_spinPatternCountY, rect);
+    m_patternForm->setRowVisible(m_spinPatternSpacingX, linear || rect);
+    m_patternForm->setRowVisible(m_spinPatternSpacingY, rect);
+    m_patternForm->setRowVisible(m_spinPatternAngle, !mirror);
+    m_patternForm->setRowVisible(m_spinPatternStepAngle, circ);
+    m_patternForm->setRowVisible(m_spinPatternCenterX, circ || mirror);
+    m_patternForm->setRowVisible(m_spinPatternCenterY, circ || mirror);
+    m_patternForm->setRowVisible(m_chkPatternMirrorX, mirror);
+    m_patternForm->setRowVisible(m_chkPatternMirrorY, mirror);
+
+    setLabel(m_spinPatternCountX, rect ? QStringLiteral("Spalten (X):") : QStringLiteral("Anzahl:"));
+    setLabel(m_spinPatternSpacingX, rect ? QStringLiteral("Abstand X:") : QStringLiteral("Abstand:"));
+    setLabel(m_spinPatternAngle, circ ? QStringLiteral("Startwinkel:") : (rect ? QStringLiteral("Drehung:") : QStringLiteral("Richtung:")));
+
+    int instances = 1;
+    if (linear || circ) instances = m_spinPatternCountX->value();
+    else if (rect) instances = m_spinPatternCountX->value() * m_spinPatternCountY->value();
+    else if (mirror) {
+        const bool mx = m_chkPatternMirrorX->isChecked();
+        const bool my = m_chkPatternMirrorY->isChecked();
+        instances = 1 + (mx ? 1 : 0) + (my ? 1 : 0) + (mx && my ? 1 : 0);
+    }
+    m_lblPatternInfo->setText(QString("Alle Blöcke bis „Muster Ende“ werden %1× ausgeführt.").arg(instances));
+}
+
 void ConversationalEditorDialog::refreshBlockList() {
     m_isUpdatingUi = true;
     m_blockList->clear();
@@ -1004,7 +1199,7 @@ void ConversationalEditorDialog::refreshBlockList() {
     for (size_t i = 0; i < m_program.size(); ++i) {
         const auto& b = m_program[i];
         auto* item = new QListWidgetItem(m_blockList);
-        item->setText(QString("[%1] %2").arg(CAM::blockTypeToString(b.type)).arg(b.name));
+        item->setText(blockListLabel(static_cast<int>(i)));
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         item->setCheckState(b.enabled ? Qt::Checked : Qt::Unchecked);
     }
@@ -1207,7 +1402,28 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
             m_stackParams->setCurrentIndex(4);
             m_txtRawGCode->setPlainText(b.rawGCode);
             break;
+        case CAM::BlockType::PatternStart:
+            m_stackParams->setCurrentIndex(8);
+            m_cmbPatternType->setCurrentIndex(static_cast<int>(b.patternType));
+            m_spinPatternCountX->setValue(b.patternCountX);
+            m_spinPatternCountY->setValue(b.patternCountY);
+            m_spinPatternSpacingX->setValue(b.patternSpacingX);
+            m_spinPatternSpacingY->setValue(b.patternSpacingY);
+            m_spinPatternAngle->setValue(b.patternAngleDeg);
+            m_spinPatternStepAngle->setValue(b.patternStepAngleDeg);
+            m_spinPatternCenterX->setValue(b.patternCenterX);
+            m_spinPatternCenterY->setValue(b.patternCenterY);
+            m_chkPatternMirrorX->setChecked(b.patternMirrorX);
+            m_chkPatternMirrorY->setChecked(b.patternMirrorY);
+            updatePatternFieldVisibility();
+            break;
+        case CAM::BlockType::PatternEnd:
+            m_stackParams->setCurrentIndex(9);
+            break;
     }
+
+    // Technologie (Werkzeug, Schnittwerte) ist für Musterblöcke ohne Bedeutung
+    if (m_techTabWidget) m_techTabWidget->setVisible(!b.isPatternBlock());
 
     // Header-Werkzeug auf den Block synchronisieren
     Core::ToolDefinition blockTool(b.toolId, "Fräser", Core::ToolType::EndMill, 6.0);
@@ -1261,6 +1477,8 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
         b.tabCount = m_spinTabCount->value();
         b.tabWidth = m_spinTabWidth->value();
         b.tabHeight = m_spinTabHeight->value();
+        // Block-Z-Ebenen → Segment 0 und alle Folgesegmente mit bisheriger Tiefe
+        Geometry::Contour::applyStartDepth(b.segments, b.startZ, b.targetZ);
     } else if (b.type == CAM::BlockType::Pocket) {
         b.pocketShape = static_cast<CAM::PocketShape>(m_cmbPocketShape->currentIndex());
         b.pocketWidthX = m_spinPocketWidthX->value();
@@ -1336,12 +1554,24 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
         }
     } else if (b.type == CAM::BlockType::RawNC) {
         b.rawGCode = m_txtRawGCode->toPlainText();
+    } else if (b.type == CAM::BlockType::PatternStart) {
+        b.patternType = static_cast<CAM::PatternType>(m_cmbPatternType->currentIndex());
+        b.patternCountX = m_spinPatternCountX->value();
+        b.patternCountY = m_spinPatternCountY->value();
+        b.patternSpacingX = m_spinPatternSpacingX->value();
+        b.patternSpacingY = m_spinPatternSpacingY->value();
+        b.patternAngleDeg = m_spinPatternAngle->value();
+        b.patternStepAngleDeg = m_spinPatternStepAngle->value();
+        b.patternCenterX = m_spinPatternCenterX->value();
+        b.patternCenterY = m_spinPatternCenterY->value();
+        b.patternMirrorX = m_chkPatternMirrorX->isChecked();
+        b.patternMirrorY = m_chkPatternMirrorY->isChecked();
     }
 
     // Listenbeschriftung aktualisieren
     auto* item = m_blockList->item(m_selectedBlockIndex);
     if (item) {
-        item->setText(QString("[%1] %2").arg(CAM::blockTypeToString(b.type)).arg(b.name));
+        item->setText(blockListLabel(m_selectedBlockIndex));
     }
 }
 
@@ -1416,6 +1646,7 @@ void ConversationalEditorDialog::onMaterialChanged(int index) {
 
 void ConversationalEditorDialog::onToolChanged(int index) {
     Q_UNUSED(index);
+    if (m_isUpdatingUi) return;
     onCalculateTechnology();
 }
 
@@ -1473,7 +1704,8 @@ void ConversationalEditorDialog::onCalculateProgramClicked() {
     Core::ToolDefinition activeTool(1, "Tool", Core::ToolType::EndMill, 6.0);
     if (!m_toolLibrary.isEmpty()) activeTool = m_toolLibrary.first();
 
-    auto rep = CAM::CollisionDetector::verifyToolpath(m_currentToolpath, m_machineConfig, activeTool, stockBounds);
+    // Jedes Segment mit seinem eigenen Werkzeug prüfen (40mm Planfräser hat andere Auskraglänge als T1)
+    auto rep = CAM::CollisionDetector::verifyToolpath(m_currentToolpath, m_machineConfig, m_toolLibrary, activeTool, stockBounds);
 
     QString collText;
     if (rep.hasErrors) {
@@ -1508,6 +1740,7 @@ void ConversationalEditorDialog::onCalculateProgramClicked() {
     m_lblProgramSummary->setText(summary);
 
     emit toolpathGenerated(m_currentToolpath);
+    emit programCalculated(m_currentToolpath);
 }
 
 void ConversationalEditorDialog::onSaveProgramClicked() {
@@ -1563,16 +1796,20 @@ void ConversationalEditorDialog::showSegmentEditor() {
     m_segmentEditorMode = SegmentEditorMode::BlockContour;
 
     // Segmente in den Datensatz-Editor laden
-    if (!b.segments.empty()) {
-        m_segmentEditor->setSegments(b.segments);
-    } else {
+    std::vector<Geometry::ContourSegment> segs = b.segments;
+    if (segs.empty()) {
         // Neuer Block: Standard-Startpunkt erstellen
         Geometry::ContourSegment startSeg;
         startSeg.type = Geometry::ContourSegmentType::StartPoint;
         startSeg.x = b.posX;
         startSeg.y = b.posY;
-        m_segmentEditor->setSegments({startSeg});
+        startSeg.z = b.targetZ;
+        segs.push_back(startSeg);
     }
+    // Z START / Z UNTEN von Segment 0 kommen aus dem Block; Folgesegmente übernehmen die Tiefe
+    Geometry::Contour::applyStartDepth(segs, b.startZ, b.targetZ);
+    m_segmentEditor->setTechnology(b.toolId, static_cast<int>(b.contourSide), b.feedRate, b.plungeFeedRate, b.spindleRpm, b.stepDown);
+    m_segmentEditor->setSegments(segs);
 
     // Zur Datensatz-Ansicht umschalten (Seite 1)
     m_masterStack->setCurrentIndex(1);
@@ -1587,6 +1824,7 @@ void ConversationalEditorDialog::hideSegmentEditor() {
         auto& b = m_program[m_selectedBlockIndex];
         b.segments = m_segmentEditor->segments();
         b.contour = m_segmentEditor->compiledContour();
+        syncBlockDepthFromSegments(b);
         m_lblContourStatus->setText(QString("%1 Schritte (%2 Pkt)").arg(b.segments.size()).arg(b.contour.points.size()));
     }
 

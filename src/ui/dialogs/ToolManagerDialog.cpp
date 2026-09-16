@@ -11,7 +11,15 @@
 namespace GeminiCNC::UI {
 
 ToolManagerDialog::ToolManagerDialog(QWidget* parent) : QWidget(parent) {
-    m_tools = Core::ToolDefinition::createDefaultLibrary();
+    // Gespeicherte Werkzeugbibliothek laden, sonst Standardwerkzeuge
+    int activeId = -1;
+    if (Core::ToolDefinition::loadLibrary(Core::ToolDefinition::defaultLibraryPath(), m_tools, activeId)) {
+        for (int i = 0; i < m_tools.size(); ++i) {
+            if (m_tools[i].id == activeId) m_activeToolIndex = i;
+        }
+    } else {
+        m_tools = Core::ToolDefinition::createDefaultLibrary();
+    }
     m_materialDb = Core::MaterialDatabase::createDefault();
     setupUi();
     populateToolList();
@@ -127,6 +135,10 @@ void ToolManagerDialog::setupUi() {
     m_btnColor->setStyleSheet("padding: 4px 8px; font-weight: bold; background-color: #FFE614; color: black; border-radius: 3px;");
     connect(m_btnColor, &QPushButton::clicked, this, &ToolManagerDialog::onColorClicked);
 
+    m_editName = new QLineEdit(this);
+    m_editName->setStyleSheet("padding: 3px; font-weight: bold;");
+    connect(m_editName, &QLineEdit::textEdited, this, &ToolManagerDialog::onParameterChanged);
+    paramLayout->addRow(QStringLiteral("Bezeichnung:"), m_editName);
     paramLayout->addRow(QStringLiteral("Ø Schneide:"), m_spinDiameter);
     paramLayout->addRow(QStringLiteral("Schneidenlänge:"), m_spinFluteLength);
     paramLayout->addRow(QStringLiteral("Ø Schaft:"), m_spinShaftDia);
@@ -265,6 +277,7 @@ void ToolManagerDialog::loadToolToEditor(int index) {
     const auto& t = m_tools[index];
 
     m_cmbType->setCurrentIndex(static_cast<int>(t.type));
+    m_editName->setText(t.name);
     m_spinDiameter->setValue(t.diameter);
     m_spinFluteLength->setValue(t.fluteLength);
     m_spinShaftDia->setValue(t.shaftDiameter);
@@ -290,6 +303,7 @@ void ToolManagerDialog::saveEditorToTool(int index) {
 
     auto& t = m_tools[index];
     t.type = static_cast<Core::ToolType>(m_cmbType->currentIndex());
+    if (!m_editName->text().trimmed().isEmpty()) t.name = m_editName->text().trimmed();
     t.diameter = m_spinDiameter->value();
     t.fluteLength = m_spinFluteLength->value();
     t.shaftDiameter = m_spinShaftDia->value();
@@ -305,7 +319,9 @@ void ToolManagerDialog::onToolListSelectionChanged() {
 }
 
 void ToolManagerDialog::onAddToolClicked() {
-    int newId = m_tools.isEmpty() ? 1 : m_tools.last().id + 1;
+    // Eindeutige T-Nummer: höchste vorhandene + 1
+    int newId = 1;
+    for (const auto& t : m_tools) newId = std::max(newId, t.id + 1);
     Core::ToolDefinition newTool(newId, QString("Werkzeug T%1").arg(newId), Core::ToolType::EndMill, 8.0);
     newTool.fluteLength = 22.0;
     newTool.stickOutLength = 35.0;
@@ -315,6 +331,7 @@ void ToolManagerDialog::onAddToolClicked() {
     m_tools.append(newTool);
     populateToolList();
     m_toolList->setCurrentRow(m_tools.size() - 1);
+    persistLibrary();
 }
 
 void ToolManagerDialog::onDeleteToolClicked() {
@@ -336,6 +353,7 @@ void ToolManagerDialog::onDeleteToolClicked() {
     m_editingIndex = -1;
     populateToolList();
     m_toolList->setCurrentRow(std::min(row, static_cast<int>(m_tools.size()) - 1));
+    persistLibrary();
     emit activeToolChanged(m_tools[m_activeToolIndex]);
 }
 
@@ -346,6 +364,7 @@ void ToolManagerDialog::onActivateClicked() {
         m_activeToolIndex = row;
         populateToolList();
         m_toolList->setCurrentRow(row);
+        persistLibrary();
         emit activeToolChanged(m_tools[m_activeToolIndex]);
     }
 }
@@ -358,6 +377,7 @@ void ToolManagerDialog::onToolTypeChanged(int index) {
         recalculateCuttingData();
         populateToolList();
         m_toolList->setCurrentRow(m_editingIndex);
+        persistLibrary();
         if (m_editingIndex == m_activeToolIndex) {
             emit activeToolChanged(m_tools[m_activeToolIndex]);
         }
@@ -375,6 +395,7 @@ void ToolManagerDialog::onParameterChanged() {
         m_toolList->blockSignals(true);
         m_toolList->setCurrentRow(m_editingIndex);
         m_toolList->blockSignals(false);
+        persistLibrary();
         if (m_editingIndex == m_activeToolIndex) {
             emit activeToolChanged(m_tools[m_activeToolIndex]);
         }
@@ -383,7 +404,19 @@ void ToolManagerDialog::onParameterChanged() {
 
 void ToolManagerDialog::onMaterialChanged(int index) {
     Q_UNUSED(index);
-    recalculateCuttingData();
+    recalculateCuttingData(); // übernimmt neue Schnittdaten ins Werkzeug
+    persistLibrary();
+}
+
+void ToolManagerDialog::persistLibrary() {
+    const int activeId = (m_activeToolIndex >= 0 && m_activeToolIndex < m_tools.size()) ? m_tools[m_activeToolIndex].id : -1;
+    const QString path = Core::ToolDefinition::defaultLibraryPath();
+    if (!Core::ToolDefinition::saveLibrary(path, m_tools, activeId) && !m_saveErrorShown) {
+        m_saveErrorShown = true; // nur einmal melden, nicht bei jedem Tastendruck
+        QMessageBox::warning(this, QStringLiteral("Werkzeugbibliothek"),
+                             QStringLiteral("Die Werkzeugbibliothek konnte nicht gespeichert werden:\n%1").arg(path));
+    }
+    emit toolLibraryChanged(m_tools);
 }
 
 void ToolManagerDialog::onColorClicked() {
@@ -401,6 +434,7 @@ void ToolManagerDialog::onColorClicked() {
         m_toolList->blockSignals(true);
         m_toolList->setCurrentRow(m_editingIndex);
         m_toolList->blockSignals(false);
+        persistLibrary();
         if (m_editingIndex == m_activeToolIndex) {
             emit activeToolChanged(m_tools[m_activeToolIndex]);
         }

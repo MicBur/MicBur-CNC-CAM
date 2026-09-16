@@ -8,9 +8,13 @@
 #include <QComboBox>
 #include <QTabWidget>
 #include <QPushButton>
+#include <QFormLayout>
 #include <vector>
 #include "geometry/Contour.h"
 #include "geometry/ContourSolver.h"
+#include "core/ToolDefinition.h"
+#include <QList>
+#include <QSet>
 
 namespace GeminiCNC::UI {
 
@@ -34,6 +38,10 @@ public:
     [[nodiscard]] const std::vector<Geometry::ContourSegment>& segments() const { return m_segments; }
     [[nodiscard]] Geometry::Contour compiledContour() const { return m_compiledContour; }
 
+    // Werkzeugauswahl aus der Bibliothek und Technologie des Blocks (Werkzeug, Fräsart, Schnittwerte)
+    void setToolLibrary(const QList<Core::ToolDefinition>& tools);
+    void setTechnology(int toolId, int contourSide, double feed, double plunge, double rpm, double stepDown);
+
     // Navigation & Softkey-Aktionen (F1..F8)
     void navigateNext();
     void navigatePrevious();
@@ -49,9 +57,14 @@ signals:
     void contourUpdated(const Geometry::Contour& contour);
     void promptChanged(const QString& promptText);
     void accepted();
+    // contourSide: 0 = Außen, 1 = Innen, 2 = Auf Kontur (CAM::ContourSide)
+    void technologyChanged(int toolId, int contourSide, double feed, double plunge, double rpm, double stepDown);
 
 private slots:
     void onInputEdited();
+    void onDepthEdited();
+    void onArcInputEdited();
+    void onTechnologyEdited();
     void onMillingTypeChanged(int idx);
 
 private:
@@ -60,6 +73,12 @@ private:
     void saveCurrentStep();
     void recompileContour();
     void updateContextPrompt();
+    [[nodiscard]] bool isArcStep(int index) const;
+    void applyArcSolution();
+
+    bool m_isSyncingTechnology{false};
+    QFormLayout* m_arcForm{nullptr};
+    QSet<QLineEdit*> m_arcKnownFields; // vom Bediener vorgegebene Bogenwerte (Rest wird berechnet)
 
     std::vector<Geometry::ContourSegment> m_segments;
     Geometry::Contour m_compiledContour;
@@ -77,6 +96,11 @@ private:
     QWidget* m_arcInputsWidget{nullptr};
 
     // LINE Eingaben (Screenshot 191921)
+    QFormLayout* m_leftForm{nullptr};
+    QLabel* m_lblXCaption{nullptr};    // X END bzw. X START (Segment 0)
+    QLabel* m_lblYCaption{nullptr};
+    QLabel* m_lblZEndCaption{nullptr}; // Z END bzw. Z UNTEN (Segment 0)
+    QLineEdit* m_editZStart{nullptr};  // Nur Segment 0
     QLineEdit* m_editLineEndX{nullptr};
     QLineEdit* m_editLineEndY{nullptr};
     QLineEdit* m_editLineZEnd{nullptr};

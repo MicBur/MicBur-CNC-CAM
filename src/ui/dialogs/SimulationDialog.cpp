@@ -1,4 +1,5 @@
 #include "SimulationDialog.h"
+#include "geometry/StlLoader.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -128,6 +129,11 @@ SimulationDialog::SimulationDialog(Simulation::SimulationEngine* engine, QWidget
     connect(m_btnExportGCode, &QPushButton::clicked, this, &SimulationDialog::onExportGCodeClicked);
     exportLayout->addWidget(m_btnExportGCode);
 
+    m_btnExportSTL = new QPushButton(QStringLiteral("📦 Fräsergebnis als STL exportieren..."), this);
+    m_btnExportSTL->setStyleSheet("padding: 8px; font-weight: bold; background-color: #2B6CB0; color: white; border-radius: 4px;");
+    connect(m_btnExportSTL, &QPushButton::clicked, this, &SimulationDialog::onExportStockSTLClicked);
+    exportLayout->addWidget(m_btnExportSTL);
+
     mainLayout->addWidget(exportGroup);
 
     mainLayout->addStretch(1);
@@ -141,11 +147,9 @@ SimulationDialog::SimulationDialog(Simulation::SimulationEngine* engine, QWidget
 }
 
 void SimulationDialog::setToolpath(const CAM::Toolpath& toolpath) {
+    // Engine wird zentral im MainWindow (programCalculated) gesetzt, hier nur für Export merken
     m_toolpath = toolpath;
     m_collisionList->clear();
-    if (m_engine) {
-        m_engine->setToolpath(toolpath);
-    }
 }
 
 void SimulationDialog::onPlayClicked() {
@@ -184,9 +188,14 @@ void SimulationDialog::onExportGCodeClicked() {
     CAM::PostProcessorContext ctx;
     ctx.crcMode = static_cast<CAM::CrcOutputMode>(m_machineConfig.crcOutputMode);
     ctx.toolNumber = 1;
-    if (!m_toolLibrary.isEmpty()) {
-        ctx.toolRadius = m_toolLibrary.first().diameter / 2.0;
-        ctx.toolNumber = m_toolLibrary.first().id;
+    // Kontext vom ersten tatsächlich verwendeten Werkzeug (nicht vom ersten der Bibliothek)
+    for (const auto& seg : m_toolpath.segments) {
+        if (seg.toolId <= 0) continue;
+        ctx.toolNumber = seg.toolId;
+        for (const auto& t : m_toolLibrary) {
+            if (t.id == seg.toolId) { ctx.toolRadius = t.diameter / 2.0; break; }
+        }
+        break;
     }
 
     // Datei-Dialog mit korrekter Endung
@@ -251,6 +260,39 @@ void SimulationDialog::onEngineProgressChanged(double percent, size_t currentSeg
 void SimulationDialog::onEngineCollision(const CAM::CollisionViolation& violation) {
     m_collisionList->addItem(violation.toString());
     m_collisionList->scrollToBottom();
+}
+
+void SimulationDialog::onExportStockSTLClicked() {
+    if (!m_engine) return;
+
+    const auto& stock = m_engine->stockModel();
+    auto mesh = stock.toMesh();
+    if (mesh.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Kein Ergebnis"),
+                           QStringLiteral("Kein Simulationsergebnis vorhanden. Bitte zuerst die Simulation starten."));
+        return;
+    }
+
+    QString path = QFileDialog::getSaveFileName(
+        this,
+        QStringLiteral("Fräsergebnis als STL speichern"),
+        QStringLiteral("fraes_ergebnis.stl"),
+        QStringLiteral("STL-Dateien (*.stl);;Alle Dateien (*.*)")
+    );
+    if (path.isEmpty()) return;
+
+    if (Geometry::StlLoader::saveBinary(path, mesh)) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Export erfolgreich"),
+            QStringLiteral("Fräsergebnis erfolgreich als STL exportiert:\n%1\n\nDreiecke: %2")
+                .arg(path)
+                .arg(mesh.triangleCount())
+        );
+    } else {
+        QMessageBox::warning(this, QStringLiteral("Fehler"),
+                           QStringLiteral("Datei konnte nicht geschrieben werden."));
+    }
 }
 
 } // namespace GeminiCNC::UI

@@ -9,6 +9,7 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QGroupBox>
+#include <QLineEdit>
 #include "core/ToolDefinition.h"
 #include "core/MaterialDatabase.h"
 #include "ToolGraphicsWidget.h"
@@ -31,6 +32,7 @@ public:
 
 signals:
     void activeToolChanged(const Core::ToolDefinition& tool);
+    void toolLibraryChanged(const QList<Core::ToolDefinition>& tools);
 
 private slots:
     void onToolListSelectionChanged();
@@ -49,6 +51,9 @@ private:
     void saveEditorToTool(int index);
     void recalculateCuttingData();
     void updateGraphics();
+    void persistLibrary(); // speichert die Bibliothek und meldet Änderungen weiter
+
+    bool m_saveErrorShown{false};
 
     // Werkzeugbibliothek
     QList<Core::ToolDefinition> m_tools;
@@ -69,6 +74,7 @@ private:
     QComboBox* m_cmbType{nullptr};
 
     // Parameter-Eingaben
+    QLineEdit*      m_editName{nullptr};
     QDoubleSpinBox* m_spinDiameter{nullptr};
     QDoubleSpinBox* m_spinFluteLength{nullptr};
     QDoubleSpinBox* m_spinShaftDia{nullptr};
