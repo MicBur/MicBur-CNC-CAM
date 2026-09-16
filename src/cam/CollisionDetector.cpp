@@ -32,11 +32,29 @@ CollisionReport CollisionDetector::verifyToolpath(
     const Core::ToolDefinition& tool,
     const Core::BoundingBox& stockBounds,
     const std::vector<Core::BoundingBox>& fixtures) {
+    return verifyToolpath(toolpath, machine, QList<Core::ToolDefinition>{}, tool, stockBounds, fixtures);
+}
+
+CollisionReport CollisionDetector::verifyToolpath(
+    Toolpath& toolpath,
+    const Core::MachineConfig& machine,
+    const QList<Core::ToolDefinition>& tools,
+    const Core::ToolDefinition& fallbackTool,
+    const Core::BoundingBox& stockBounds,
+    const std::vector<Core::BoundingBox>& fixtures) {
 
     CollisionReport report;
 
+    auto resolveTool = [&](int toolId) -> const Core::ToolDefinition& {
+        for (const auto& t : tools) {
+            if (t.id == toolId) return t;
+        }
+        return fallbackTool;
+    };
+
     for (size_t i = 0; i < toolpath.segments.size(); ++i) {
         auto& seg = toolpath.segments[i];
+        const Core::ToolDefinition& tool = resolveTool(seg.toolId);
         seg.hasCollision = false;
         seg.collisionWarning.clear();
 

@@ -32,13 +32,21 @@ struct PathSegment {
     bool coolantOn{false};
 
     int toolId{-1};
-    double toolDiameter{6.0};  // Werkzeugdurchmesser für Simulation (mm)
+    double toolDiameter{0.0};  // Werkzeugdurchmesser für Simulation (mm), 0 = aktives Werkzeug
     int lineNumber{0};
 
     bool hasCollision{false};
     QString collisionWarning;
     bool visible{true}; // Sichtbarkeit im 3D Viewport
     int blockId{-1}; // Zugehöriger ConversationalBlock ID
+
+    // Bohrzyklus (nur Bohrblöcke): 0..5 = G81/G83/G73/G84/G85/G86, -1 = kein Zyklus
+    int drillCycle{-1};
+    int drillHole{-1};          // laufende Bohrungsnummer innerhalb des Blocks
+    double drillDepthZ{0.0};    // Endtiefe Z
+    double drillRPlaneZ{0.0};   // R-Ebene
+    double drillPeck{0.0};      // Zustelltiefe Q
+    double drillDwellSec{0.0};  // Verweilzeit P (s)
 
     [[nodiscard]] double length() const;
     [[nodiscard]] double estimatedSeconds() const;

@@ -101,9 +101,14 @@ QString Toolpath::exportWithPostProcessor(
 
     PostProcessorContext ctx;
     ctx.crcMode = static_cast<CrcOutputMode>(machineConfig.crcOutputMode);
-    if (!tools.isEmpty()) {
-        ctx.toolNumber = tools.first().id;
-        ctx.toolRadius = tools.first().diameter * 0.5;
+    // Kontext vom ersten tatsächlich verwendeten Werkzeug (nicht vom ersten der Bibliothek)
+    for (const auto& seg : segments) {
+        if (seg.toolId <= 0) continue;
+        ctx.toolNumber = seg.toolId;
+        for (const auto& t : tools) {
+            if (t.id == seg.toolId) { ctx.toolRadius = t.diameter * 0.5; break; }
+        }
+        break;
     }
 
     return pp->process(*this, machineConfig, tools, ctx);

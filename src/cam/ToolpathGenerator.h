@@ -32,6 +32,24 @@ struct ContourParams {
     double finishAllowance{0.2}; // Schlichtaufmaß (mm)
     double clearanceZ{5.0};
     bool useRampEntry{false};
+
+    // Fräsrichtung (Spindel M3): Gleichlauf = außen im, innen gegen den Uhrzeigersinn
+    bool climbMilling{true};
+    // An-/Abfahrt auf der materialabgewandten Seite: 0 = Direkt, 1 = Tangentialbogen, 2 = Senkrecht
+    int leadType{0};
+    double leadRadius{2.0};
+    // Eintauchen: 0 = Senkrecht, 1/2 = Rampe entlang der Bahn
+    int entryType{0};
+    double rampAngleDeg{5.0};
+    // Haltestege (nur geschlossene Konturen)
+    bool useTabs{false};
+    int tabCount{4};
+    double tabWidth{5.0};   // Stegbreite am Werkstück (mm)
+    double tabHeight{1.0};  // Steghöhe über Endtiefe (mm)
+
+    // Tiefenprofil je Konturpunkt (Z ENDE der Segmente); leer = überall targetZ.
+    // Jede Zustellebene fräst höchstens bis zu diesem Profil.
+    std::vector<double> vertexZ;
 };
 
 struct PocketParams {
@@ -41,6 +59,13 @@ struct PocketParams {
     double stepOverRatio{0.5}; // 50% Fräserdurchmesser
     double finishAllowance{0.2};
     double clearanceZ{5.0};
+
+    // 0 = Zickzack, 1 = Spiral (innen → außen), 2 = Konturparallel (außen → innen)
+    int strategy{1};
+    bool climbMilling{true};
+    // Eintauchen: 0 = Senkrecht, 1 = Helix, 2 = Rampe
+    int entryType{0};
+    double rampAngleDeg{5.0};
 };
 
 struct StockRoughingParams {

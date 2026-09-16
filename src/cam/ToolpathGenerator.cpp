@@ -1,6 +1,7 @@
 #include "ToolpathGenerator.h"
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include "geometry/PolygonOffset.h"
 
 namespace GeminiCNC::CAM {
@@ -68,13 +69,246 @@ Toolpath ToolpathGenerator::generateFacing(const Core::BoundingBox& stockBounds,
     return tp;
 }
 
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+
+struct P2 {
+    double x{0.0};
+    double y{0.0};
+};
+
+P2 add(P2 a, P2 b) { return {a.x + b.x, a.y + b.y}; }
+P2 sub(P2 a, P2 b) { return {a.x - b.x, a.y - b.y}; }
+P2 mul(P2 a, double s) { return {a.x * s, a.y * s}; }
+double len(P2 a) { return std::hypot(a.x, a.y); }
+P2 normalized(P2 a) {
+    const double l = len(a);
+    return l > 1e-12 ? P2{a.x / l, a.y / l} : P2{1.0, 0.0};
+}
+P2 leftNormal(P2 d) { return {-d.y, d.x}; }
+
+double polygonArea(const std::vector<P2>& pts) {
+    double area = 0.0;
+    for (size_t i = 0; i < pts.size(); ++i) {
+        const P2 a = pts[i];
+        const P2 b = pts[(i + 1) % pts.size()];
+        area += a.x * b.y - b.x * a.y;
+    }
+    return area * 0.5;
+}
+
+bool pointInPolygon(const std::vector<P2>& poly, P2 p) {
+    bool inside = false;
+    if (poly.size() < 3) return false;
+    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+        const P2 a = poly[i];
+        const P2 b = poly[j];
+        if (((a.y > p.y) != (b.y > p.y)) && (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x)) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+// Echte Kreuzung zweier Strecken (Berühren an Endpunkten oder kollineares Anliegen zählt nicht)
+bool segmentsCross(P2 a, P2 b, P2 c, P2 d) {
+    auto orient = [](P2 o, P2 p, P2 q) { return (p.x - o.x) * (q.y - o.y) - (p.y - o.y) * (q.x - o.x); };
+    const double d1 = orient(a, b, c), d2 = orient(a, b, d);
+    const double d3 = orient(c, d, a), d4 = orient(c, d, b);
+    constexpr double eps = 1e-9;
+    return ((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps))
+        && ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps));
+}
+
+// Konturpunkte ohne Doppelpunkte; geschlossene Konturen ohne wiederholten Startpunkt
+std::vector<P2> toPoints(const Geometry::Contour& c) {
+    std::vector<P2> pts;
+    pts.reserve(c.points.size());
+    for (const auto& p : c.points) {
+        const P2 q{p.x, p.y};
+        if (pts.empty() || len(sub(q, pts.back())) > 1e-7) pts.push_back(q);
+    }
+    if (c.isClosed && pts.size() > 1 && len(sub(pts.front(), pts.back())) < 1e-7) pts.pop_back();
+    return pts;
+}
+
+std::vector<double> zLevels(double startZ, double targetZ, double stepDown) {
+    std::vector<double> levels;
+    const double step = std::max(0.1, stepDown);
+    double z = startZ;
+    while (z > targetZ + 1e-5) {
+        z = std::max(targetZ, z - step);
+        levels.push_back(z);
+    }
+    if (levels.empty()) levels.push_back(targetZ);
+    return levels;
+}
+
+// Schreibt Fahrbewegungen und merkt sich die aktuelle Werkzeugposition
+struct PathWriter {
+    Toolpath& tp;
+    const Core::ToolDefinition& tool;
+    Core::Vector3D pos;
+
+    void move(MotionType motion, double x, double y, double z, double feed) {
+        if (std::abs(x - pos.x) < 1e-9 && std::abs(y - pos.y) < 1e-9 && std::abs(z - pos.z) < 1e-9) return;
+        PathSegment seg;
+        seg.motion = motion;
+        seg.startPos = pos;
+        seg.endPos = Core::Vector3D(x, y, z);
+        seg.feedRate = (motion == MotionType::Rapid) ? 0.0 : feed;
+        seg.spindleRpm = tool.spindleSpeed;
+        seg.toolId = tool.id;
+        seg.toolDiameter = tool.diameter;
+        tp.addSegment(seg);
+        pos = seg.endPos;
+    }
+    void rapid(double x, double y, double z) { move(MotionType::Rapid, x, y, z, 0.0); }
+    void feed(double x, double y, double z, double f) { move(MotionType::LinearFeed, x, y, z, f); }
+};
+
+// Werkzeugbahn als Polylinie mit Bogenlängen-Parametrisierung
+struct Polyline {
+    std::vector<P2> pts;
+    std::vector<double> z;   // Tiefe je Punkt (Tiefenprofil)
+    bool closed{false};
+    std::vector<double> cum; // cum[i] = Bogenlänge bis Punkt i, cum.back() = Gesamtlänge
+
+    void build() {
+        cum.assign(1, 0.0);
+        const size_t edges = closed ? pts.size() : pts.size() - 1;
+        for (size_t i = 0; i < edges; ++i) {
+            cum.push_back(cum.back() + len(sub(pts[(i + 1) % pts.size()], pts[i])));
+        }
+    }
+    [[nodiscard]] double length() const { return cum.back(); }
+    [[nodiscard]] size_t edgeAt(double local) const {
+        const auto it = std::upper_bound(cum.begin(), cum.end(), local);
+        const size_t e = (it == cum.begin()) ? 0 : static_cast<size_t>(it - cum.begin()) - 1;
+        return std::min(e, cum.size() - 2);
+    }
+    [[nodiscard]] P2 pointOnEdge(size_t e, double local) const {
+        const P2 a = pts[e];
+        const P2 b = pts[(e + 1) % pts.size()];
+        const double el = cum[e + 1] - cum[e];
+        const double t = el > 1e-12 ? std::clamp((local - cum[e]) / el, 0.0, 1.0) : 0.0;
+        return add(a, mul(sub(b, a), t));
+    }
+    [[nodiscard]] P2 pointAt(double s) const {
+        const double total = length();
+        const double local = closed ? s - std::floor(s / total) * total : std::clamp(s, 0.0, total);
+        return pointOnEdge(edgeAt(local), local);
+    }
+    // Tiefenprofil an Bogenlänge s (linear zwischen den Punkten)
+    [[nodiscard]] double zAt(double s) const {
+        const double total = length();
+        const double local = closed ? s - std::floor(s / total) * total : std::clamp(s, 0.0, total);
+        const size_t e = edgeAt(local);
+        const double el = cum[e + 1] - cum[e];
+        const double t = el > 1e-12 ? std::clamp((local - cum[e]) / el, 0.0, 1.0) : 0.0;
+        return z[e] + (z[(e + 1) % pts.size()] - z[e]) * t;
+    }
+};
+
+// Haltestege entlang einer geschlossenen Bahn (Mitte und halbe Breite als Bogenlänge)
+struct TabLayout {
+    bool active{false};
+    double topZ{0.0};
+    double halfWidth{0.0};
+    double total{0.0};
+    std::vector<double> centers;
+
+    [[nodiscard]] bool inTab(double s) const {
+        if (!active || total <= 0.0) return false;
+        const double local = s - std::floor(s / total) * total;
+        for (double c : centers) {
+            double d = std::abs(local - c);
+            d = std::min(d, total - d);
+            if (d < halfWidth) return true;
+        }
+        return false;
+    }
+    [[nodiscard]] std::vector<double> breaks() const {
+        std::vector<double> b;
+        if (!active) return b;
+        for (double c : centers) {
+            for (double e : {c - halfWidth, c + halfWidth}) b.push_back(e - std::floor(e / total) * total);
+        }
+        return b;
+    }
+};
+
+// Fährt die Polylinie von Bogenlänge a bis b (geschlossen auch über das Ende hinaus) mit Höhe zAt(s).
+// An Unstetigkeiten (Haltestegkanten) wird senkrecht verfahren.
+template <typename ZFunc>
+void followPath(PathWriter& w, const Polyline& path, double a, double b,
+                const std::vector<double>& breaks, ZFunc zAt, double feed, double plunge) {
+    const double total = path.length();
+    if (total < 1e-9 || b - a < 1e-9) return;
+
+    std::vector<double> stops{a, b};
+    const int kFrom = path.closed ? static_cast<int>(std::floor(a / total)) - 1 : 0;
+    const int kTo = path.closed ? static_cast<int>(std::floor(b / total)) + 1 : 0;
+    for (int k = kFrom; k <= kTo; ++k) {
+        for (double c : path.cum) {
+            const double s = c + k * total;
+            if (s > a + 1e-9 && s < b - 1e-9) stops.push_back(s);
+        }
+        for (double br : breaks) {
+            const double s = br + k * total;
+            if (s > a + 1e-9 && s < b - 1e-9) stops.push_back(s);
+        }
+    }
+    std::sort(stops.begin(), stops.end());
+
+    for (size_t i = 0; i + 1 < stops.size(); ++i) {
+        const double u = stops[i];
+        const double v = stops[i + 1];
+        if (v - u < 1e-9) continue;
+        const double mid = 0.5 * (u + v);
+        const double shift = path.closed ? std::floor(mid / total) * total : 0.0;
+        const size_t e = path.edgeAt(mid - shift);
+        const P2 pu = path.pointOnEdge(e, u - shift);
+        const P2 pv = path.pointOnEdge(e, v - shift);
+        const double eps = std::min(1e-6, 0.25 * (v - u));
+        const double zu = zAt(u + eps);
+        const double zv = zAt(v - eps);
+        if (std::abs(w.pos.z - zu) > 1e-6 || std::abs(w.pos.x - pu.x) > 1e-6 || std::abs(w.pos.y - pu.y) > 1e-6) {
+            w.feed(pu.x, pu.y, zu, zu < w.pos.z ? plunge : feed);
+        }
+        w.feed(pv.x, pv.y, zv, feed);
+    }
+}
+
+// Rampe hin und her entlang der ersten Schnittrichtung bis auf Tiefe
+void rampDown(PathWriter& w, P2 a, P2 toward, double zFrom, double zTo, double slope, double maxLen, double feed, double plunge) {
+    const double l = std::min(len(sub(toward, a)), maxLen);
+    if (l < 0.05 || zFrom <= zTo + 1e-6) {
+        w.feed(a.x, a.y, zTo, plunge);
+        return;
+    }
+    const P2 b = add(a, mul(normalized(sub(toward, a)), l));
+    double z = zFrom;
+    bool atA = true;
+    while (z > zTo + 1e-6) {
+        z = std::max(zTo, z - l * slope);
+        const P2 t = atA ? b : a;
+        w.feed(t.x, t.y, z, feed);
+        atA = !atA;
+    }
+    if (!atA) w.feed(a.x, a.y, zTo, feed);
+}
+
+} // namespace
+
 Toolpath ToolpathGenerator::generateContourMilling(const Geometry::Contour& contour,
                                                   const Core::ToolDefinition& tool,
                                                   const ContourParams& params) {
-    Toolpath tp(QStringLiteral("KonturfrÃ¤sen"));
+    Toolpath tp(QStringLiteral("Konturfräsen"));
     if (contour.points.size() < 2) return tp;
 
-    // Offset-Kontur berechnen
+    // Offset-Kontur berechnen (Fräserradius + Schlichtaufmaß)
     double offsetDist = 0.0;
     const double r = tool.diameter * 0.5 + params.finishAllowance;
     if (params.side == ContourSide::Outside) {
@@ -82,54 +316,158 @@ Toolpath ToolpathGenerator::generateContourMilling(const Geometry::Contour& cont
     } else if (params.side == ContourSide::Inside) {
         offsetDist = contour.isClockwise() ? r : -r;
     }
+    const Geometry::Contour pathContour = (params.side != ContourSide::OnLine)
+                                          ? contour.createOffset(offsetDist)
+                                          : contour;
 
-    Geometry::Contour pathContour = (params.side != ContourSide::OnLine)
-                                    ? contour.createOffset(offsetDist)
-                                    : contour;
+    // Punkte mit Tiefenprofil (nur wenn es zur Konturpunktzahl passt, sonst überall targetZ)
+    const bool hasProfile = !params.vertexZ.empty() && params.vertexZ.size() == pathContour.points.size();
+    Polyline path;
+    for (size_t k = 0; k < pathContour.points.size(); ++k) {
+        const P2 q{pathContour.points[k].x, pathContour.points[k].y};
+        const double qz = hasProfile ? params.vertexZ[k] : params.targetZ;
+        if (path.pts.empty() || len(sub(q, path.pts.back())) > 1e-7) {
+            path.pts.push_back(q);
+            path.z.push_back(qz);
+        } else {
+            path.z.back() = std::min(path.z.back(), qz);
+        }
+    }
+    if (pathContour.isClosed && path.pts.size() > 1 && len(sub(path.pts.front(), path.pts.back())) < 1e-7) {
+        path.z.front() = std::min(path.z.front(), path.z.back());
+        path.pts.pop_back();
+        path.z.pop_back();
+    }
+    path.closed = pathContour.isClosed && path.pts.size() >= 3;
+    if (path.pts.size() < 2) return tp;
 
-    if (pathContour.points.empty()) return tp;
+    // Fräsrichtung (Spindel M3): Gleichlauf = Material rechts der Vorschubrichtung,
+    // also außen im Uhrzeigersinn und innen gegen den Uhrzeigersinn. Der Startpunkt bleibt.
+    const bool oriented = path.closed && params.side != ContourSide::OnLine;
+    if (oriented) {
+        const bool isCW = polygonArea(path.pts) < 0.0;
+        const bool wantCW = (params.side == ContourSide::Outside) == params.climbMilling;
+        if (isCW != wantCW) {
+            std::reverse(path.pts.begin() + 1, path.pts.end());
+            std::reverse(path.z.begin() + 1, path.z.end());
+        }
+    }
+    path.build();
+    const double total = path.length();
+    if (total < 1e-6) return tp;
 
+    const double feed = tool.defaultFeedRate;
+    const double plunge = tool.plungeFeedRate > 0.0 ? tool.plungeFeedRate : feed;
     const double clearanceZ = params.clearanceZ;
-    const double stepDown = std::max(0.1, params.stepDown);
-    double currentZ = params.startZ;
-    const double targetZ = params.targetZ;
+    const double retractZ = std::max(params.startZ + 1.0, std::min(clearanceZ, params.startZ + 2.0));
+    const P2 p0 = path.pts.front();
 
-    const auto& startPt = pathContour.points.front();
-    Core::Vector3D currentPos(startPt.x, startPt.y, clearanceZ);
-
-    // Initialer Eilgang Ã¼ber ersten Konturpunkt
-    tp.addSegment({MotionType::Rapid, currentPos, {startPt.x, startPt.y, clearanceZ}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-    currentPos = {startPt.x, startPt.y, clearanceZ};
-
-    while (currentZ > targetZ - 1e-5) {
-        currentZ -= stepDown;
-        if (currentZ < targetZ) currentZ = targetZ;
-
-        // Eintauchen auf aktuelle Z-Ebene
-        tp.addSegment({MotionType::LinearFeed, currentPos, {currentPos.x, currentPos.y, currentZ}, {}, tool.plungeFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-        currentPos = {currentPos.x, currentPos.y, currentZ};
-
-        // Entlang der Kontur abfahren
-        const size_t ptCount = pathContour.points.size();
-        for (size_t i = 1; i < ptCount; ++i) {
-            const auto& pt = pathContour.points[i];
-            Core::Vector3D nextPos(pt.x, pt.y, currentZ);
-            tp.addSegment({MotionType::LinearFeed, currentPos, nextPos, {}, tool.defaultFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-            currentPos = nextPos;
+    // An-/Abfahrt auf der materialabgewandten Seite (bei Gleichlauf links der Vorschubrichtung)
+    std::vector<P2> leadIn;
+    std::vector<P2> leadOut;
+    if (oriented && params.leadType > 0 && params.leadRadius > 1e-3) {
+        const double R = params.leadRadius;
+        auto awayFrom = [&params](P2 dir) {
+            const P2 l = leftNormal(dir);
+            return params.climbMilling ? l : mul(l, -1.0);
+        };
+        const P2 dIn = normalized(sub(path.pts[1], p0));
+        const P2 dOut = normalized(sub(p0, path.pts.back()));
+        const P2 nIn = awayFrom(dIn);
+        const P2 nOut = awayFrom(dOut);
+        if (params.leadType == 1) {
+            constexpr int arcSteps = 8;
+            const P2 cIn = add(p0, mul(nIn, R));
+            for (int i = 0; i < arcSteps; ++i) {
+                const double t = 0.5 * kPi * i / arcSteps;
+                leadIn.push_back(add(cIn, add(mul(dIn, -R * std::cos(t)), mul(nIn, -R * std::sin(t)))));
+            }
+            const P2 cOut = add(p0, mul(nOut, R));
+            for (int i = 1; i <= arcSteps; ++i) {
+                const double t = 0.5 * kPi * i / arcSteps;
+                leadOut.push_back(add(cOut, add(mul(nOut, -R * std::cos(t)), mul(dOut, R * std::sin(t)))));
+            }
+        } else {
+            leadIn.push_back(add(p0, mul(nIn, R)));
+            leadOut.push_back(add(p0, mul(nOut, R)));
         }
+    }
 
-        // Falls geschlossen, zurÃ¼ck zum Startpunkt
-        if (pathContour.isClosed) {
-            Core::Vector3D loopClosePos(startPt.x, startPt.y, currentZ);
-            tp.addSegment({MotionType::LinearFeed, currentPos, loopClosePos, {}, tool.defaultFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-            currentPos = loopClosePos;
+    // Haltestege: in den Ebenen unterhalb der Steghöhe bleibt Material stehen
+    TabLayout tabs;
+    tabs.total = total;
+    if (params.useTabs && path.closed && params.tabCount > 0 && params.tabHeight > 1e-3) {
+        tabs.active = true;
+        tabs.topZ = params.targetZ + params.tabHeight;
+        tabs.halfWidth = std::min(0.5 * (params.tabWidth + tool.diameter), 0.45 * total / params.tabCount);
+        for (int i = 0; i < params.tabCount; ++i) {
+            tabs.centers.push_back((i + 0.5) * total / params.tabCount);
         }
+    }
+    const std::vector<double> tabBreaks = tabs.breaks();
+    const double tabHeight = params.tabHeight;
+    auto tabZ = [&tabs, &path, tabHeight](double s, double z) {
+        return (tabs.active && tabs.inTab(s)) ? std::max(z, path.zAt(s) + tabHeight) : z;
+    };
 
-        if (std::abs(currentZ - targetZ) < 1e-5) break;
+    const bool useRamp = leadIn.empty() && path.closed && (params.entryType > 0 || params.useRampEntry);
+    const double rampSlope = std::tan(std::clamp(params.rampAngleDeg, 0.5, 45.0) * kPi / 180.0);
+
+    const P2 entry = leadIn.empty() ? p0 : leadIn.front();
+    PathWriter w{tp, tool, Core::Vector3D(entry.x, entry.y, clearanceZ)};
+
+    double zPrev = params.startZ;
+    double sPos = 0.0;    // Bogenlänge, an der das Werkzeug auf der Bahn steht
+    bool onPath = false;  // Werkzeug steht nach einer Umrundung auf Tiefe an sPos
+
+    const double deepestZ = *std::min_element(path.z.begin(), path.z.end());
+    for (double z : zLevels(params.startZ, deepestZ, params.stepDown)) {
+        // Zustellebene z, aber nie tiefer als das Tiefenprofil der Kontur
+        auto cutZ = [&tabZ, &path, z](double s) { return tabZ(s, std::max(z, path.zAt(s))); };
+        const double zAtStart = cutZ(0.0);
+
+        if (useRamp) {
+            // Rampe entlang der Bahn von der vorigen Ebene auf die neue Tiefe, danach volle Umrundung
+            const P2 at = path.pointAt(sPos);
+            if (!onPath) {
+                w.rapid(at.x, at.y, std::max(w.pos.z, retractZ));
+                w.feed(at.x, at.y, zPrev, plunge);
+            }
+            const double s0 = sPos;
+            const double rampLen = std::max(0.0, (zPrev - z) / rampSlope);
+            const double zTop = zPrev;
+            followPath(w, path, s0, s0 + rampLen, tabBreaks,
+                       [&tabZ, &path, z, zTop, s0, rampSlope](double s) {
+                           return tabZ(s, std::max({z, path.zAt(s), zTop - (s - s0) * rampSlope}));
+                       },
+                       feed, plunge);
+            followPath(w, path, s0 + rampLen, s0 + rampLen + total, tabBreaks, cutZ, feed, plunge);
+            sPos = std::fmod(s0 + rampLen, total);
+            onPath = true;
+        } else if (!leadIn.empty()) {
+            // Eintauchen neben der Kontur, An- und Abfahrt auf jeder Ebene
+            if (w.pos.z < retractZ - 1e-9) w.rapid(w.pos.x, w.pos.y, retractZ);
+            w.rapid(entry.x, entry.y, w.pos.z);
+            w.feed(entry.x, entry.y, zAtStart, plunge);
+            for (size_t i = 1; i < leadIn.size(); ++i) w.feed(leadIn[i].x, leadIn[i].y, zAtStart, feed);
+            w.feed(p0.x, p0.y, zAtStart, feed);
+            followPath(w, path, 0.0, total, tabBreaks, cutZ, feed, plunge);
+            for (const P2& q : leadOut) w.feed(q.x, q.y, w.pos.z, feed);
+        } else {
+            // Senkrecht eintauchen am Startpunkt
+            if (!onPath) {
+                if (w.pos.z < retractZ - 1e-9) w.rapid(w.pos.x, w.pos.y, retractZ);
+                w.rapid(p0.x, p0.y, w.pos.z);
+            }
+            w.feed(p0.x, p0.y, zAtStart, plunge);
+            followPath(w, path, 0.0, total, tabBreaks, cutZ, feed, plunge);
+            onPath = path.closed;
+        }
+        zPrev = z;
     }
 
     // Rückzug
-    tp.addSegment({MotionType::Rapid, currentPos, {currentPos.x, currentPos.y, clearanceZ}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
+    w.rapid(w.pos.x, w.pos.y, clearanceZ);
     return tp;
 }
 
@@ -150,81 +488,200 @@ Toolpath ToolpathGenerator::generatePocketMilling(const Geometry::Contour& bound
     const double toolRadius = tool.diameter * 0.5;
     const double stepOver = tool.diameter * std::clamp(params.stepOverRatio, 0.1, 0.9);
     const double clearanceZ = params.clearanceZ;
-    const double stepDown = std::max(0.1, params.stepDown);
-    const double targetZ = params.targetZ;
+    const double retractZ = std::max(params.startZ + 1.0, std::min(clearanceZ, params.startZ + 2.0));
+    const double feed = tool.defaultFeedRate;
+    const double plunge = tool.plungeFeedRate > 0.0 ? tool.plungeFeedRate : feed;
+    const double rampSlope = std::tan(std::clamp(params.rampAngleDeg, 0.5, 45.0) * kPi / 180.0);
 
-    // 1. Konzentrische Inset-Rings über PolygonOffset berechnen
-    std::vector<std::vector<Geometry::Contour>> rings = 
-        Geometry::PolygonOffset::generatePocketContours(boundary, islands, toolRadius, stepOver, params.finishAllowance);
+    // 1. Konzentrische Ringe (außen → innen) über PolygonOffset
+    const auto rings = Geometry::PolygonOffset::generatePocketContours(boundary, islands, toolRadius, stepOver, params.finishAllowance);
 
-    if (rings.empty()) {
-        return tp; // Tasche zu klein für diesen Fräser oder ungültig
+    // 2. Ringkonturen als Polylinien; Umlaufsinn nach Fräsrichtung
+    //    (Gleichlauf: Außenrand gegen, Inselränder im Uhrzeigersinn)
+    using Loop = std::vector<P2>;
+    std::vector<std::vector<Loop>> ringLoops;
+    for (const auto& ring : rings) {
+        std::vector<Loop> loops;
+        for (const auto& c : ring) {
+            Loop pts = toPoints(c);
+            if (pts.size() >= 3) loops.push_back(std::move(pts));
+        }
+        for (size_t i = 0; i < loops.size(); ++i) {
+            bool isHole = false;
+            for (size_t j = 0; j < loops.size(); ++j) {
+                if (i != j && pointInPolygon(loops[j], loops[i].front())) isHole = !isHole;
+            }
+            const bool wantCCW = (params.climbMilling != isHole);
+            if ((polygonArea(loops[i]) > 0.0) != wantCCW) std::reverse(loops[i].begin() + 1, loops[i].end());
+        }
+        if (!loops.empty()) ringLoops.push_back(std::move(loops));
     }
+    if (ringLoops.empty()) return tp; // Tasche zu klein für diesen Fräser oder ungültig
 
-    // 2. Von innen nach außen abfahren (Conventional)
-    std::reverse(rings.begin(), rings.end());
-
-    double currentZ = params.startZ;
-    while (currentZ > targetZ - 1e-5) {
-        currentZ -= stepDown;
-        if (currentZ < targetZ) currentZ = targetZ;
-
-        // Eintauchen im Zentrum des allersten (innersten) Rings
-        const auto& firstRingContours = rings.front();
-        if (firstRingContours.empty()) break;
-        
-        const auto& centerPt = firstRingContours.front().points.front();
-        Core::Vector3D currentPos(centerPt.x, centerPt.y, clearanceZ);
-
-        // Anfahren Eilgang
-        tp.addSegment({MotionType::Rapid, currentPos, {centerPt.x, centerPt.y, clearanceZ}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-        // Eintauchen Vorschub
-        tp.addSegment({MotionType::LinearFeed, {centerPt.x, centerPt.y, clearanceZ}, {centerPt.x, centerPt.y, currentZ}, {}, tool.plungeFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-        currentPos = {centerPt.x, centerPt.y, currentZ};
-
-        // 3. Alle Ringe abfahren
-        for (const auto& ringContours : rings) {
-            for (const auto& contour : ringContours) {
-                if (contour.points.empty()) continue;
-
-                // Zum Startpunkt der aktuellen Kontur fahren (G0 knapp über Werkstück oder G1 wenn nahe)
-                const auto& startPt = contour.points.front();
-                Core::Vector3D nextStart(startPt.x, startPt.y, currentZ);
-                
-                // Simpler Retract-Move zum nächsten Ringteil wenn weit weg
-                double distSq = (currentPos.x - nextStart.x) * (currentPos.x - nextStart.x) + 
-                                (currentPos.y - nextStart.y) * (currentPos.y - nextStart.y);
-                if (distSq > stepOver * stepOver * 4.0) {
-                    tp.addSegment({MotionType::Rapid, currentPos, {currentPos.x, currentPos.y, currentZ + 1.0}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-                    tp.addSegment({MotionType::Rapid, {currentPos.x, currentPos.y, currentZ + 1.0}, {nextStart.x, nextStart.y, currentZ + 1.0}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-                    tp.addSegment({MotionType::LinearFeed, {nextStart.x, nextStart.y, currentZ + 1.0}, nextStart, {}, tool.plungeFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-                } else {
-                    // Direkte Verbindung
-                    tp.addSegment({MotionType::LinearFeed, currentPos, nextStart, {}, tool.defaultFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-                }
-                currentPos = nextStart;
-
-                // Konturpunkte abfahren
-                for (size_t i = 1; i < contour.points.size(); ++i) {
-                    const auto& pt = contour.points[i];
-                    Core::Vector3D nextPos(pt.x, pt.y, currentZ);
-                    tp.addSegment({MotionType::LinearFeed, currentPos, nextPos, {}, tool.defaultFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-                    currentPos = nextPos;
-                }
-
-                // Kontur schließen (isClosed)
-                if (contour.isClosed) {
-                    Core::Vector3D closePos(startPt.x, startPt.y, currentZ);
-                    tp.addSegment({MotionType::LinearFeed, currentPos, closePos, {}, tool.defaultFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-                    currentPos = closePos;
-                }
+    // Äußerster Ring = zulässiger Bereich der Fräsermitte
+    const std::vector<Loop>& region = ringLoops.front();
+    auto insideRegion = [&region](P2 p) {
+        bool in = false;
+        for (const auto& loop : region) {
+            if (pointInPolygon(loop, p)) in = !in;
+        }
+        return in;
+    };
+    auto crossesRegion = [&region](P2 a, P2 b) {
+        for (const auto& loop : region) {
+            for (size_t i = 0; i < loop.size(); ++i) {
+                if (segmentsCross(a, b, loop[i], loop[(i + 1) % loop.size()])) return true;
             }
         }
+        return false;
+    };
 
-        // Rückzug auf clearanceZ am Ende jeder Ebene
-        tp.addSegment({MotionType::Rapid, currentPos, {currentPos.x, currentPos.y, clearanceZ}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-        
-        if (std::abs(currentZ - targetZ) < 1e-5) break;
+    // 3. Bearbeitungsfolge je Ebene
+    struct Cut {
+        std::vector<P2> pts;
+        bool closed{false};
+    };
+    std::vector<Cut> cuts;
+    if (params.strategy == 0) {
+        // Zickzack: Rasterzeilen in X, abwechselnd hin und zurück; danach Randbahnen
+        double yMin = std::numeric_limits<double>::max();
+        double yMax = std::numeric_limits<double>::lowest();
+        for (const auto& loop : region) {
+            for (const P2& p : loop) {
+                yMin = std::min(yMin, p.y);
+                yMax = std::max(yMax, p.y);
+            }
+        }
+        const double height = yMax - yMin - 2e-3;
+        if (height > 0.0) {
+            const int lineCount = std::max(1, static_cast<int>(std::ceil(height / stepOver))) + 1;
+            bool reverseRow = false;
+            for (int i = 0; i < lineCount; ++i) {
+                const double y = yMin + 1e-3 + height * i / (lineCount - 1);
+                std::vector<double> xs;
+                for (const auto& loop : region) {
+                    for (size_t k = 0; k < loop.size(); ++k) {
+                        const P2 a = loop[k];
+                        const P2 b = loop[(k + 1) % loop.size()];
+                        if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y)) {
+                            xs.push_back(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y));
+                        }
+                    }
+                }
+                std::sort(xs.begin(), xs.end());
+                std::vector<Cut> row;
+                for (size_t k = 0; k + 1 < xs.size(); k += 2) {
+                    if (xs[k + 1] - xs[k] > 1e-3) row.push_back({{P2{xs[k], y}, P2{xs[k + 1], y}}, false});
+                }
+                if (row.empty()) continue;
+                if (reverseRow) {
+                    std::reverse(row.begin(), row.end());
+                    for (auto& cut : row) std::reverse(cut.pts.begin(), cut.pts.end());
+                }
+                reverseRow = !reverseRow;
+                cuts.insert(cuts.end(), row.begin(), row.end());
+            }
+        }
+        for (const auto& loop : region) cuts.push_back({loop, true});
+    } else {
+        auto ordered = ringLoops;
+        if (params.strategy == 1) std::reverse(ordered.begin(), ordered.end()); // Spiral: innen → außen
+        for (const auto& ring : ordered) {
+            for (const auto& loop : ring) cuts.push_back({loop, true});
+        }
+    }
+    if (cuts.empty()) return tp;
+
+    const double maxDirectLink = (params.strategy == 0 ? 3.0 : 2.0) * stepOver;
+    const P2 entry = cuts.front().pts[0];
+    const P2 toward = cuts.front().pts[1];
+
+    // Helix-Eintauchen nur, wenn der Helixkreis vollständig im zulässigen Bereich liegt
+    P2 helixCenter;
+    double helixR = 0.0;
+    if (params.entryType == 1) {
+        P2 c;
+        for (const P2& p : cuts.front().pts) c = add(c, p);
+        c = mul(c, 1.0 / static_cast<double>(cuts.front().pts.size()));
+        double minDist = std::numeric_limits<double>::max();
+        for (const P2& p : cuts.front().pts) minDist = std::min(minDist, len(sub(p, c)));
+        const double hr = std::min(0.25 * tool.diameter, 0.5 * minDist);
+        bool fits = hr >= 0.1 && insideRegion(c) && !crossesRegion(c, entry);
+        for (int i = 0; fits && i < 16; ++i) {
+            const double a = 2.0 * kPi * i / 16.0;
+            const P2 q = add(c, P2{hr * std::cos(a), hr * std::sin(a)});
+            fits = insideRegion(q) && !crossesRegion(c, q);
+        }
+        if (fits) {
+            helixCenter = c;
+            helixR = hr;
+        }
+    }
+
+    PathWriter w{tp, tool, Core::Vector3D(entry.x, entry.y, clearanceZ)};
+
+    // Verbindung zur nächsten Bahn: kurz und im zulässigen Bereich → im Vorschub,
+    // sonst über die Sicherheitshöhe (kein Eilgang und keine Überfahrt durch Material/Inseln)
+    auto linkTo = [&](P2 target, P2 next, double z) {
+        const P2 cur{w.pos.x, w.pos.y};
+        const double dist = len(sub(target, cur));
+        if (dist < 1e-6 && std::abs(w.pos.z - z) < 1e-6) return;
+        bool direct = dist <= maxDirectLink && std::abs(w.pos.z - z) < 1e-6;
+        if (direct) {
+            P2 probe = mul(add(cur, target), 0.5);
+            if (len(sub(next, target)) > 1e-6) probe = add(probe, mul(normalized(sub(next, target)), 1e-3));
+            direct = !crossesRegion(cur, target) && insideRegion(probe);
+        }
+        if (direct) {
+            w.feed(target.x, target.y, z, feed);
+        } else {
+            w.rapid(cur.x, cur.y, std::max(w.pos.z, retractZ));
+            w.rapid(target.x, target.y, w.pos.z);
+            w.feed(target.x, target.y, z, plunge);
+        }
+    };
+
+    double zPrev = params.startZ;
+    for (double z : zLevels(params.startZ, params.targetZ, params.stepDown)) {
+        // Einstieg
+        if (helixR > 0.0) {
+            const P2 s0 = add(helixCenter, P2{helixR, 0.0});
+            w.rapid(s0.x, s0.y, clearanceZ);
+            w.feed(s0.x, s0.y, zPrev, plunge);
+            const double pitch = std::max(0.2, 2.0 * kPi * helixR * rampSlope);
+            const double depth = zPrev - z;
+            const double turns = depth / pitch;
+            const int steps = std::max(8, static_cast<int>(std::ceil(turns * 24.0)));
+            for (int i = 1; i <= steps; ++i) {
+                const double t = static_cast<double>(i) / steps;
+                const double a = 2.0 * kPi * turns * t;
+                w.feed(helixCenter.x + helixR * std::cos(a), helixCenter.y + helixR * std::sin(a), zPrev - depth * t, feed);
+            }
+            const double aEnd = 2.0 * kPi * turns;
+            for (int i = 1; i <= 24; ++i) {
+                const double a = aEnd + 2.0 * kPi * i / 24.0;
+                w.feed(helixCenter.x + helixR * std::cos(a), helixCenter.y + helixR * std::sin(a), z, feed);
+            }
+            w.feed(entry.x, entry.y, z, feed);
+        } else if (params.entryType > 0) {
+            w.rapid(entry.x, entry.y, clearanceZ);
+            w.feed(entry.x, entry.y, zPrev, plunge);
+            rampDown(w, entry, toward, zPrev, z, rampSlope, 2.0 * tool.diameter, feed, plunge);
+        } else {
+            w.rapid(entry.x, entry.y, clearanceZ);
+            w.feed(entry.x, entry.y, z, plunge);
+        }
+
+        // Bahnen abfahren
+        for (const auto& cut : cuts) {
+            linkTo(cut.pts[0], cut.pts.size() > 1 ? cut.pts[1] : cut.pts[0], z);
+            for (size_t k = 1; k < cut.pts.size(); ++k) w.feed(cut.pts[k].x, cut.pts[k].y, z, feed);
+            if (cut.closed) w.feed(cut.pts[0].x, cut.pts[0].y, z, feed);
+        }
+
+        // Rückzug am Ende jeder Ebene
+        w.rapid(w.pos.x, w.pos.y, clearanceZ);
+        zPrev = z;
     }
 
     return tp;

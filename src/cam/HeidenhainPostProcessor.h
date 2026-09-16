@@ -35,6 +35,9 @@ protected:
                         const Core::ToolDefinition& tool) override;
 
     [[nodiscard]] QString formatComment(const QString& text) const override;
+
+    // TNC-ISO kennt keine Fanuc-Bohrzyklen G81–G86 (dort CYCL DEF 200 ff.) → Einzelbewegungen
+    [[nodiscard]] bool supportsCannedCycles() const override { return false; }
 };
 
 } // namespace GeminiCNC::CAM

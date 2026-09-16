@@ -106,6 +106,24 @@ protected:
     /** Schneidradiuskorrektur deaktivieren (G40). */
     virtual void emitCrcOff(QTextStream& out);
 
+    /** Kühlmittel ein/aus (M08/M09). */
+    virtual void emitCoolant(QTextStream& out, bool on);
+
+    /** Bohrzyklus für aufeinanderfolgende Bohrungen eines Blocks (G98 G8x … G80). */
+    virtual void emitCannedDrillCycle(QTextStream& out, const std::vector<const PathSegment*>& holes, double feed);
+
+    /** Steuerung kann G2/G3 – Geradenzüge auf Kreisen werden zu Bögen zusammengefasst. */
+    [[nodiscard]] virtual bool supportsArcs() const { return true; }
+
+    /** Steuerung kann Bohrzyklen G81–G86 – sonst werden die Einzelbewegungen ausgegeben. */
+    [[nodiscard]] virtual bool supportsCannedCycles() const { return true; }
+
+    /** Nullpunktverschiebung: 0 = G54 … 5 = G59. */
+    [[nodiscard]] static QString workOffsetCode(int index);
+
+    /** Nach Zyklen den nächsten G0/G1 wieder ausdrücklich ausgeben. */
+    void forgetMotionModality();
+
     /**
      * @brief Hook für Spezialzyklen (Gewinde, Bohren).
      * @return true wenn der PP den Zyklus nativ ausgegeben hat (Toolpath-Segmente werden übersprungen).

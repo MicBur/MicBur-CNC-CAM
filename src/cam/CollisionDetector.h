@@ -49,6 +49,18 @@ public:
         const Core::ToolDefinition& tool,
         const Core::BoundingBox& stockBounds,
         const std::vector<Core::BoundingBox>& fixtures = {});
+
+    /**
+     * @brief Wie oben, aber prüft jedes Segment mit seinem eigenen Werkzeug (seg.toolId → Bibliothek).
+     *        Unbekannte Werkzeug-IDs werden mit fallbackTool geprüft.
+     */
+    [[nodiscard]] static CollisionReport verifyToolpath(
+        Toolpath& toolpath,
+        const Core::MachineConfig& machine,
+        const QList<Core::ToolDefinition>& tools,
+        const Core::ToolDefinition& fallbackTool,
+        const Core::BoundingBox& stockBounds,
+        const std::vector<Core::BoundingBox>& fixtures = {});
 };
 
 } // namespace GeminiCNC::CAM

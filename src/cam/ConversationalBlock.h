@@ -20,7 +20,16 @@ enum class BlockType {
     HelixThread, // 3D-Helix & Gewindefräsen
     Drill,       // Bohrbild (Einzeln, Lochkreis, Raster)
     Stl3D,       // 3D-STL Freiformflächen-Fräsen
-    RawNC        // Direkter G-Code / Klipper Makros
+    RawNC,       // Direkter G-Code / Klipper Makros
+    PatternStart,// Muster Start: wiederholt alle folgenden Blöcke bis Muster Ende
+    PatternEnd   // Muster Ende: schließt das zuletzt geöffnete Muster
+};
+
+enum class PatternType {
+    Linear = 0,  // Lineare Reihe (Anzahl, Abstand, Richtung)
+    Rectangular, // Rechteckraster (Spalten × Zeilen)
+    Circular,    // Kreismuster / Drehen um Mittelpunkt
+    Mirror       // Spiegeln an senkrechter und/oder waagrechter Achse
 };
 
 QString blockTypeToString(BlockType type);
@@ -204,6 +213,23 @@ public:
 
     // Raw NC Code
     QString rawGCode;
+
+    // ═══ Muster (Muster Start) ═══
+    PatternType patternType{PatternType::Linear};
+    int patternCountX{3};             // Anzahl (Linear/Kreis) bzw. Spalten (Raster)
+    int patternCountY{2};             // Zeilen (Raster)
+    double patternSpacingX{20.0};     // Abstand (Linear) bzw. Spaltenabstand (Raster)
+    double patternSpacingY{20.0};     // Zeilenabstand (Raster)
+    double patternAngleDeg{0.0};      // Richtung (Linear/Raster) bzw. Startwinkel (Kreis)
+    double patternStepAngleDeg{0.0};  // Winkelschritt (Kreis, 0 = gleichmäßig auf 360°)
+    double patternCenterX{0.0};       // Dreh-/Spiegelzentrum
+    double patternCenterY{0.0};
+    bool patternMirrorX{true};        // Spiegeln an senkrechter Achse (X → -X)
+    bool patternMirrorY{false};       // Spiegeln an waagrechter Achse (Y → -Y)
+
+    [[nodiscard]] bool isPatternBlock() const {
+        return type == BlockType::PatternStart || type == BlockType::PatternEnd;
+    }
 
     ConversationalBlock() = default;
     explicit ConversationalBlock(int blockId, BlockType blockType, const QString& blockName);

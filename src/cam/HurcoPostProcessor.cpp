@@ -41,7 +41,7 @@ void HurcoPostProcessor::emitHeader(QTextStream& out, const Toolpath& tp,
     out << formatLineNumber() << " G17 " << formatComment("XY-EBENE") << "\n";
     out << formatLineNumber() << " G90 " << formatComment("ABSOLUT") << "\n";
     out << formatLineNumber() << " G94 " << formatComment("VORSCHUB MM/MIN") << "\n";
-    out << formatLineNumber() << " G54 " << formatComment("WERKSTUECK-NULLPUNKT AKTIVIEREN") << "\n";
+    out << formatLineNumber() << " " << workOffsetCode(machine.workOffset) << " " << formatComment("WERKSTUECK-NULLPUNKT AKTIVIEREN") << "\n";
     out << formatLineNumber() << " G40 " << formatComment("RADIUSKORREKTUR AUS") << "\n";
     out << formatLineNumber() << " G49 " << formatComment("LAENGENKORREKTUR AUS") << "\n";
     out << formatLineNumber() << " G80 " << formatComment("FESTZYKLEN AUS") << "\n\n";
