@@ -90,6 +90,8 @@ private:
     std::unique_ptr<GPUStockModel> m_gpuStockModel;
     std::unique_ptr<ShaderProgram> m_hybridShader;
     bool m_useDynamicStock{false};
+    const Simulation::StockModel* m_dynamicStockSource{nullptr}; // gehört der SimulationEngine
+    bool m_dynamicStockDirty{false};
     int m_renderMode{0}; // 0 = Realistic, 1 = Heatmap
     
     int m_materialPreset{1}; // 1=Alu default

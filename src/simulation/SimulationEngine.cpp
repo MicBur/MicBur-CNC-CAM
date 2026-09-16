@@ -34,10 +34,39 @@ void SimulationEngine::setToolpath(const CAM::Toolpath& toolpath) {
 
 void SimulationEngine::setActiveTool(const Core::ToolDefinition& tool) {
     m_activeTool = tool;
+    m_lastEmittedToolId = tool.id;
+}
+
+void SimulationEngine::setToolLibrary(const QList<Core::ToolDefinition>& tools) {
+    m_toolLibrary = tools;
+}
+
+void SimulationEngine::checkToolChange(int segToolId) {
+    if (segToolId <= 0 || segToolId == m_lastEmittedToolId) return;
+
+    // Werkzeug aus Library auflösen
+    for (const auto& t : m_toolLibrary) {
+        if (t.id == segToolId) {
+            m_activeTool = t;
+            m_lastEmittedToolId = segToolId;
+            emit activeToolChanged(t);
+            return;
+        }
+    }
 }
 
 void SimulationEngine::setStockBounds(const Core::BoundingBox& stockBounds) {
     m_stockModel = StockModel(stockBounds);
+    m_stockModel.isCylinder = false;
+}
+
+void SimulationEngine::setCylinderStock(const Core::BoundingBox& stockBounds, double radius) {
+    m_stockModel = StockModel(stockBounds);
+    m_stockModel.maskCylinder(radius);
+}
+
+void SimulationEngine::setMeshStock(const Geometry::Mesh& stockMesh) {
+    m_stockModel.initFromMesh(stockMesh);
 }
 
 void SimulationEngine::play() {
@@ -93,6 +122,9 @@ void SimulationEngine::stepForward() {
 
     const auto& seg = m_toolpath.segments[m_currentSegmentIdx];
     m_currentPos = seg.endPos;
+
+    // Werkzeugwechsel erkennen und Viewport/Header aktualisieren
+    checkToolChange(seg.toolId);
 
     // Kollision am Segment prüfen
     if (seg.hasCollision) {
@@ -194,11 +226,15 @@ void SimulationEngine::updateSegmentMovement(double dtSec) {
 
     double speedMmSec = (seg.motion == CAM::MotionType::Rapid ? 5000.0 : seg.feedRate) / 60.0;
     double remainingDist = speedMmSec * dtSec;
-    QColor toolColor = m_activeTool.color.isEmpty() ? QColor(255, 230, 20) : QColor(m_activeTool.color);
     bool didCarve = false;
 
     while (remainingDist > 0.0 && m_currentSegmentIdx < m_toolpath.size()) {
         const auto& curSeg = m_toolpath.segments[m_currentSegmentIdx];
+
+        // Werkzeugwechsel erkennen (aktualisiert m_activeTool, Viewport, Header)
+        checkToolChange(curSeg.toolId);
+        QColor toolColor = m_activeTool.color.isEmpty() ? QColor(255, 230, 20) : QColor(m_activeTool.color);
+
         double curLen = curSeg.length();
         if (curLen < 1e-6) {
             m_currentSegmentIdx++;

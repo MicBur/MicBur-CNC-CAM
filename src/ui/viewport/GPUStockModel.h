@@ -25,26 +25,25 @@ public:
     ~GPUStockModel();
 
     void initializeGL();
-    
-    // Kopiert die initialen Höhen aus dem CPU StockModel
+
+    // Baut die Rohteil-Oberfläche aus dem CPU StockModel komplett auf
     void initFromCPU(const Simulation::StockModel& cpuModel);
 
-    // Aktualisiert das GPU Modell basierend auf dem geänderten CPU Modell
+    // Aktualisiert das GPU Modell (Schichten/Durchbrüche können die Topologie ändern → Neuaufbau)
     void updateFromCPU(const Simulation::StockModel& cpuModel);
 
-    // Rendert das Grid
+    // Rendert die Oberfläche
     void render(QOpenGLShaderProgram* shader, int renderMode);
 
     bool isInitialized() const { return m_initialized; }
 
 private:
-    void rebuildNormalsAndTargetZ(const Simulation::StockModel& cpuModel);
+    void upload(const Simulation::StockModel& cpuModel);
 
     bool m_initialized{false};
-    int m_resX{0}, m_resY{0};
+    bool m_attribsSet{false};
 
-    std::vector<GridVertex> m_grid;
-    std::vector<uint32_t> m_indices;
+    std::vector<GridVertex> m_vertices;
 
     QOpenGLVertexArrayObject m_vao;
     QOpenGLBuffer m_vbo;

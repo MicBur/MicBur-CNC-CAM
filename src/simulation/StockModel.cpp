@@ -1,8 +1,20 @@
 #include "StockModel.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace GeminiCNC::Simulation {
+
+namespace {
+constexpr float kMinLayerThickness = 1e-3f;
+constexpr uint32_t kNoVertex = std::numeric_limits<uint32_t>::max();
+
+// Farbkonfiguration nach Bedienerwunsch:
+// Ungefrästes Material = BLAU (CNC-Standard), gefrästes Material = Werkzeugfarbe
+constexpr float uncutR = 0.16f, uncutG = 0.42f, uncutB = 0.88f, uncutA = 0.92f;
+constexpr float sideR  = 0.12f, sideG  = 0.32f, sideB  = 0.72f, sideA  = 0.96f;
+constexpr float botR   = 0.10f, botG   = 0.28f, botB   = 0.65f, botA   = 0.98f;
+} // namespace
 
 StockModel::StockModel(const Core::BoundingBox& stockBounds, int resolution)
     : bounds(stockBounds) {
@@ -23,12 +35,195 @@ StockModel::StockModel(const Core::BoundingBox& stockBounds, int resolution)
         resY = resolution;
     }
     initialTopZ = static_cast<float>(stockBounds.isValid() ? stockBounds.maxPoint.z : 0.0);
+
+    // Ausgangszustand: voller Quader (eine Schicht von Unter- bis Oberkante)
+    const size_t n = static_cast<size_t>(resX) * resY;
+    m_initialCount.assign(n, stockBounds.isValid() ? 1 : 0);
+    m_initialLo.assign(n * kMaxLayers, floorZ());
+    m_initialHi.assign(n * kMaxLayers, initialTopZ);
     reset();
 }
 
+float StockModel::floorZ() const {
+    return static_cast<float>(bounds.isValid() ? bounds.minPoint.z : 0.0);
+}
+
+void StockModel::updateTop(size_t idx) {
+    const uint8_t c = layerCount[idx];
+    heightField[idx] = c > 0 ? layerHi[idx * kMaxLayers + c - 1] : floorZ();
+}
+
 void StockModel::reset() {
-    heightField.assign(resX * resY, initialTopZ);
-    cutColors.assign(resX * resY, 0);
+    const size_t n = static_cast<size_t>(resX) * resY;
+    if (m_initialCount.size() != n) {
+        m_initialCount.assign(n, 0);
+        m_initialLo.assign(n * kMaxLayers, 0.0f);
+        m_initialHi.assign(n * kMaxLayers, 0.0f);
+    }
+    layerCount = m_initialCount;
+    layerLo = m_initialLo;
+    layerHi = m_initialHi;
+    cutColors.assign(n, 0);
+    heightField.assign(n, floorZ());
+    for (size_t i = 0; i < n; ++i) {
+        updateTop(i);
+    }
+}
+
+void StockModel::maskCylinder(double radius) {
+    isCylinder = true;
+    cylinderRadius = radius;
+    if (!bounds.isValid() || m_initialCount.empty()) return;
+
+    const double cx = (bounds.minPoint.x + bounds.maxPoint.x) * 0.5;
+    const double cy = (bounds.minPoint.y + bounds.maxPoint.y) * 0.5;
+    const double dx = bounds.widthX() / (resX - 1);
+    const double dy = bounds.depthY() / (resY - 1);
+    const double r2 = cylinderRadius * cylinderRadius;
+
+    for (int j = 0; j < resY; ++j) {
+        double py = bounds.minPoint.y + j * dy;
+        for (int i = 0; i < resX; ++i) {
+            double px = bounds.minPoint.x + i * dx;
+            double distSq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
+            if (distSq > r2) {
+                m_initialCount[j * resX + i] = 0;
+            }
+        }
+    }
+    reset();
+}
+
+void StockModel::initFromMesh(const Geometry::Mesh& mesh) {
+    *this = StockModel(mesh.boundingBox);
+    if (!bounds.isValid() || mesh.triangles.empty()) return;
+
+    const double dx = bounds.widthX() / (resX - 1);
+    const double dy = bounds.depthY() / (resY - 1);
+    if (dx <= 1e-6 || dy <= 1e-6) return;
+
+    const size_t n = static_cast<size_t>(resX) * resY;
+    const size_t vCount = mesh.vertices.size();
+
+    // Orientierung über das Volumen bestimmen (nach innen gedrehte STL-Dateien abfangen)
+    double signedVolume = 0.0;
+    for (const auto& tri : mesh.triangles) {
+        if (tri.i0 >= vCount || tri.i1 >= vCount || tri.i2 >= vCount) continue;
+        const auto& a = mesh.vertices[tri.i0];
+        const auto& b = mesh.vertices[tri.i1];
+        const auto& c = mesh.vertices[tri.i2];
+        signedVolume += static_cast<double>(a.x) * (static_cast<double>(b.y) * c.z - static_cast<double>(b.z) * c.y)
+                      - static_cast<double>(a.y) * (static_cast<double>(b.x) * c.z - static_cast<double>(b.z) * c.x)
+                      + static_cast<double>(a.z) * (static_cast<double>(b.x) * c.y - static_cast<double>(b.y) * c.x);
+    }
+    const double orientation = signedVolume < 0.0 ? -1.0 : 1.0;
+
+    // Senkrechte Strahlen je Gitterpunkt: +1 = Eintritt (Unterseite), -1 = Austritt (Oberseite)
+    struct Hit { float z; int dir; };
+    std::vector<std::vector<Hit>> hits(n);
+
+    for (const auto& tri : mesh.triangles) {
+        if (tri.i0 >= vCount || tri.i1 >= vCount || tri.i2 >= vCount) continue;
+        const auto& v0 = mesh.vertices[tri.i0];
+        const auto& v1 = mesh.vertices[tri.i1];
+        const auto& v2 = mesh.vertices[tri.i2];
+
+        const double ax = v1.x - v0.x, ay = v1.y - v0.y;
+        const double bx = v2.x - v0.x, by = v2.y - v0.y;
+        const double det = ax * by - bx * ay;
+        if (std::abs(det) < 1e-9) continue; // senkrechte Wand – wird von Z-Strahlen nicht getroffen
+        const int dir = (det * orientation > 0.0) ? -1 : 1; // von oben gegen den Uhrzeigersinn = Oberseite
+
+        const double minX = std::min({v0.x, v1.x, v2.x}), maxX = std::max({v0.x, v1.x, v2.x});
+        const double minY = std::min({v0.y, v1.y, v2.y}), maxY = std::max({v0.y, v1.y, v2.y});
+        int i0 = std::clamp(static_cast<int>(std::ceil((minX - bounds.minPoint.x) / dx - 1e-6)), 0, resX - 1);
+        int i1 = std::clamp(static_cast<int>(std::floor((maxX - bounds.minPoint.x) / dx + 1e-6)), 0, resX - 1);
+        int j0 = std::clamp(static_cast<int>(std::ceil((minY - bounds.minPoint.y) / dy - 1e-6)), 0, resY - 1);
+        int j1 = std::clamp(static_cast<int>(std::floor((maxY - bounds.minPoint.y) / dy + 1e-6)), 0, resY - 1);
+
+        for (int j = j0; j <= j1; ++j) {
+            const double py = bounds.minPoint.y + j * dy - v0.y;
+            for (int i = i0; i <= i1; ++i) {
+                const double px = bounds.minPoint.x + i * dx - v0.x;
+                const double w1 = (px * by - bx * py) / det;
+                const double w2 = (ax * py - px * ay) / det;
+                const double w0 = 1.0 - w1 - w2;
+                const double eps = -1e-6;
+                if (w0 < eps || w1 < eps || w2 < eps) continue;
+                hits[j * resX + i].push_back({static_cast<float>(w0 * v0.z + w1 * v1.z + w2 * v2.z), dir});
+            }
+        }
+    }
+
+    std::vector<std::pair<float, float>> spans;
+    std::vector<std::pair<float, float>> merged;
+    std::vector<float> zs;
+
+    for (size_t p = 0; p < n; ++p) {
+        auto& h = hits[p];
+        m_initialCount[p] = 0;
+        if (h.empty()) continue;
+
+        // Bei gleicher Höhe Eintritt vor Austritt → aufeinanderliegende Körper verschmelzen
+        std::sort(h.begin(), h.end(), [](const Hit& a, const Hit& b) {
+            return a.z < b.z || (a.z == b.z && a.dir > b.dir);
+        });
+
+        spans.clear();
+        int wind = 0;
+        float start = 0.0f;
+        float lastZ[3] = {-1e30f, -1e30f, -1e30f}; // je Richtung, gegen Doppeltreffer an gemeinsamen Kanten
+        for (const auto& hit : h) {
+            float& last = lastZ[hit.dir + 1];
+            if (std::abs(hit.z - last) < 1e-4f) continue;
+            last = hit.z;
+            const int before = wind;
+            wind += hit.dir;
+            if (before <= 0 && wind > 0) {
+                start = hit.z;
+            } else if (before > 0 && wind <= 0) {
+                spans.emplace_back(start, hit.z);
+            }
+        }
+
+        if (wind != 0) {
+            // Offenes oder uneinheitlich orientiertes Mesh → Paritätsregel
+            spans.clear();
+            zs.clear();
+            for (const auto& hit : h) {
+                if (zs.empty() || hit.z - zs.back() > 1e-4f) zs.push_back(hit.z);
+            }
+            for (size_t k = 0; k + 1 < zs.size(); k += 2) {
+                spans.emplace_back(zs[k], zs[k + 1]);
+            }
+        }
+
+        // Dünne Abschnitte verwerfen, fast berührende zusammenfügen
+        merged.clear();
+        for (const auto& s : spans) {
+            if (s.second - s.first < kMinLayerThickness) continue;
+            if (!merged.empty() && s.first - merged.back().second < kMinLayerThickness) {
+                merged.back().second = std::max(merged.back().second, s.second);
+            } else {
+                merged.push_back(s);
+            }
+        }
+        if (merged.empty()) continue;
+
+        // Nur die obersten kMaxLayers behalten; darunterliegende Abschnitte in die unterste Schicht einrechnen
+        size_t first = merged.size() > static_cast<size_t>(kMaxLayers) ? merged.size() - kMaxLayers : 0;
+        if (first > 0) merged[first].first = merged.front().first;
+
+        uint8_t count = 0;
+        for (size_t k = first; k < merged.size(); ++k) {
+            m_initialLo[p * kMaxLayers + count] = merged[k].first;
+            m_initialHi[p * kMaxLayers + count] = merged[k].second;
+            ++count;
+        }
+        m_initialCount[p] = count;
+    }
+
+    reset();
 }
 
 void StockModel::carveCylinder(const Core::Vector3D& toolCenter, double radius, double cutZ, const QColor& toolColor) {
@@ -36,9 +231,10 @@ void StockModel::carveCylinder(const Core::Vector3D& toolCenter, double radius, 
 }
 
 void StockModel::carveSegment(const Core::Vector3D& p0, const Core::Vector3D& p1, double radius, const QColor& toolColor) {
-    if (!bounds.isValid() || heightField.empty()) return;
-    if (cutColors.size() != heightField.size()) {
-        cutColors.assign(resX * resY, 0);
+    const size_t n = static_cast<size_t>(resX) * resY;
+    if (!bounds.isValid() || layerCount.size() != n) return;
+    if (cutColors.size() != n) {
+        cutColors.assign(n, 0);
     }
 
     const double dx = bounds.widthX() / (resX - 1);
@@ -78,162 +274,193 @@ void StockModel::carveSegment(const Core::Vector3D& p0, const Core::Vector3D& p1
             double nearestY = p0.y + t * segDy;
             double dX = px - nearestX;
             double dY = py - nearestY;
+            if (dX * dX + dY * dY > rSq) continue;
 
-            if (dX * dX + dY * dY <= rSq) {
-                float cutZf = static_cast<float>(p0.z + t * (p1.z - p0.z));
-                int idx = j * resX + i;
-                if (heightField[idx] > cutZf) {
-                    heightField[idx] = cutZf;
-                    cutColors[idx] = colorRgba;
+            // Senkrechter Fräser: alles oberhalb der Werkzeugspitze wird entfernt
+            const float cutZf = static_cast<float>(p0.z + t * (p1.z - p0.z));
+            const size_t idx = static_cast<size_t>(j) * resX + i;
+            uint8_t& count = layerCount[idx];
+            bool changed = false;
+            while (count > 0) {
+                const size_t k = idx * kMaxLayers + count - 1;
+                if (layerHi[k] <= cutZf) break;
+                if (cutZf <= layerLo[k] + kMinLayerThickness) {
+                    --count; // Schicht vollständig abgetragen (Durchbruch)
+                    changed = true;
+                    continue;
                 }
+                layerHi[k] = cutZf;
+                changed = true;
+                break;
+            }
+            if (changed) {
+                updateTop(idx);
+                cutColors[idx] = colorRgba;
             }
         }
     }
 }
 
-Geometry::Mesh StockModel::toMesh() const {
-    Geometry::Mesh mesh(Geometry::MeshRole::Stock, QStringLiteral("Dynamisches Rohteil"));
-    if (!bounds.isValid() || heightField.size() != static_cast<size_t>(resX * resY)) {
-        return mesh;
-    }
+StockModel::Surface StockModel::buildSurface() const {
+    Surface s;
+    const size_t n = static_cast<size_t>(resX) * resY;
+    if (!bounds.isValid() || resX < 2 || resY < 2 || layerCount.size() != n) return s;
 
     const double dx = bounds.widthX() / (resX - 1);
     const double dy = bounds.depthY() / (resY - 1);
-    const float bottomZ = static_cast<float>(bounds.minPoint.z);
+    const int L = kMaxLayers;
 
-    // Farbkonfiguration nach Bedienerwunsch:
-    // Ungefrästes Material = BLAU (CNC-Standard)
-    // Gefrästes Material = GELB (oder spezifische Werkzeugfarbe)
-    constexpr float uncutR = 0.16f, uncutG = 0.42f, uncutB = 0.88f, uncutA = 0.92f;
-    constexpr float sideR  = 0.12f, sideG  = 0.32f, sideB  = 0.72f, sideA  = 0.96f;
-    constexpr float botR   = 0.10f, botG   = 0.28f, botB   = 0.65f, botA   = 0.98f;
+    auto has = [&](int i, int j, int k) {
+        return i >= 0 && j >= 0 && i < resX && j < resY && layerCount[static_cast<size_t>(j) * resX + i] > k;
+    };
+    auto lo = [&](int i, int j, int k) { return layerLo[(static_cast<size_t>(j) * resX + i) * L + k]; };
+    auto hi = [&](int i, int j, int k) { return layerHi[(static_cast<size_t>(j) * resX + i) * L + k]; };
+    auto cellDrawn = [&](int i, int j, int k) {
+        return i >= 0 && j >= 0 && i < resX - 1 && j < resY - 1
+            && has(i, j, k) && has(i + 1, j, k) && has(i, j + 1, k) && has(i + 1, j + 1, k);
+    };
+    auto px = [&](int i) { return static_cast<float>(bounds.minPoint.x + i * dx); };
+    auto py = [&](int j) { return static_cast<float>(bounds.minPoint.y + j * dy); };
 
-    // 1. Oberflächen-Gitter (bearbeitete Z-Höhen mit Farbunterscheidung)
-    mesh.vertices.reserve(resX * resY + 2 * (resX + resY) + 4);
-    for (int j = 0; j < resY; ++j) {
-        float y = static_cast<float>(bounds.minPoint.y + j * dy);
-        for (int i = 0; i < resX; ++i) {
-            int idx = j * resX + i;
-            float x = static_cast<float>(bounds.minPoint.x + i * dx);
-            float z = heightField[idx];
+    // Glatte Normale aus den Nachbarhöhen derselben Schicht
+    auto surfaceNormal = [&](int i, int j, int k, bool top, float& nx, float& ny, float& nz) {
+        auto zAt = [&](int ii, int jj) { return top ? hi(ii, jj, k) : lo(ii, jj, k); };
+        const int il = has(i - 1, j, k) ? i - 1 : i, ir = has(i + 1, j, k) ? i + 1 : i;
+        const int jd = has(i, j - 1, k) ? j - 1 : j, ju = has(i, j + 1, k) ? j + 1 : j;
+        const float dzdx = (ir != il) ? (zAt(ir, j) - zAt(il, j)) / static_cast<float>((ir - il) * dx) : 0.0f;
+        const float dzdy = (ju != jd) ? (zAt(i, ju) - zAt(i, jd)) / static_cast<float>((ju - jd) * dy) : 0.0f;
+        nx = top ? -dzdx : dzdx;
+        ny = top ? -dzdy : dzdy;
+        nz = top ? 1.0f : -1.0f;
+        const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        nx /= len; ny /= len; nz /= len;
+    };
 
-            float vr = uncutR, vg = uncutG, vb = uncutB, va = uncutA;
-            if (idx < static_cast<int>(cutColors.size()) && cutColors[idx] != 0) {
+    std::vector<uint32_t> topIdx(n * L, kNoVertex);
+    std::vector<uint32_t> botIdx(n * L, kNoVertex);
+
+    auto topVertex = [&](int i, int j, int k) -> uint32_t {
+        const size_t p = static_cast<size_t>(j) * resX + i;
+        uint32_t& slot = topIdx[p * L + k];
+        if (slot == kNoVertex) {
+            float nx, ny, nz;
+            surfaceNormal(i, j, k, true, nx, ny, nz);
+            float r = uncutR, g = uncutG, b = uncutB, a = uncutA;
+            if (k == layerCount[p] - 1 && p < cutColors.size() && cutColors[p] != 0) {
                 // Gefräste Stelle: Werkzeugfarbe (Standard: Signalgelb #FFE614)
-                QColor c = QColor::fromRgba(cutColors[idx]);
-                vr = static_cast<float>(c.redF());
-                vg = static_cast<float>(c.greenF());
-                vb = static_cast<float>(c.blueF());
-                va = 1.0f;
+                const QColor c = QColor::fromRgba(cutColors[p]);
+                r = static_cast<float>(c.redF());
+                g = static_cast<float>(c.greenF());
+                b = static_cast<float>(c.blueF());
+                a = 1.0f;
             }
-            mesh.vertices.push_back({x, y, z, 0.0f, 0.0f, 1.0f, vr, vg, vb, va});
+            slot = static_cast<uint32_t>(s.vertices.size());
+            s.vertices.push_back({px(i), py(j), hi(i, j, k), nx, ny, nz, r, g, b, a});
+        }
+        return slot;
+    };
+    auto bottomVertex = [&](int i, int j, int k) -> uint32_t {
+        const size_t p = static_cast<size_t>(j) * resX + i;
+        uint32_t& slot = botIdx[p * L + k];
+        if (slot == kNoVertex) {
+            float nx, ny, nz;
+            surfaceNormal(i, j, k, false, nx, ny, nz);
+            slot = static_cast<uint32_t>(s.vertices.size());
+            s.vertices.push_back({px(i), py(j), lo(i, j, k), nx, ny, nz, botR, botG, botB, botA});
+        }
+        return slot;
+    };
+    auto addTri = [&](uint32_t a, uint32_t b, uint32_t c) {
+        s.indices.push_back(a);
+        s.indices.push_back(b);
+        s.indices.push_back(c);
+    };
+
+    // Senkrechte Wand entlang der Kante a → b mit Außennormale (nx, ny)
+    auto addWall = [&](int ia, int ja, int ib, int jb, int k, float nx, float ny) {
+        const float ta = hi(ia, ja, k), tb = hi(ib, jb, k);
+        const float ba = lo(ia, ja, k), bb = lo(ib, jb, k);
+        if (ta - ba < kMinLayerThickness && tb - bb < kMinLayerThickness) return;
+
+        const uint32_t base = static_cast<uint32_t>(s.vertices.size());
+        s.vertices.push_back({px(ia), py(ja), ba, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
+        s.vertices.push_back({px(ib), py(jb), bb, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
+        s.vertices.push_back({px(ib), py(jb), tb, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
+        s.vertices.push_back({px(ia), py(ja), ta, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
+
+        // Umlaufsinn so wählen, dass die Dreiecksnormale nach außen zeigt
+        const float ex = px(ib) - px(ia);
+        const float ey = py(jb) - py(ja);
+        if (ey * nx - ex * ny > 0.0f) {
+            addTri(base, base + 1, base + 2);
+            addTri(base, base + 2, base + 3);
+        } else {
+            addTri(base, base + 2, base + 1);
+            addTri(base, base + 3, base + 2);
+        }
+    };
+
+    for (int k = 0; k < L; ++k) {
+        for (int j = 0; j < resY - 1; ++j) {
+            for (int i = 0; i < resX - 1; ++i) {
+                if (!cellDrawn(i, j, k)) continue;
+
+                const uint32_t t00 = topVertex(i, j, k), t10 = topVertex(i + 1, j, k);
+                const uint32_t t01 = topVertex(i, j + 1, k), t11 = topVertex(i + 1, j + 1, k);
+                addTri(t00, t10, t11);
+                addTri(t00, t11, t01);
+
+                const uint32_t b00 = bottomVertex(i, j, k), b10 = bottomVertex(i + 1, j, k);
+                const uint32_t b01 = bottomVertex(i, j + 1, k), b11 = bottomVertex(i + 1, j + 1, k);
+                addTri(b00, b11, b10);
+                addTri(b00, b01, b11);
+
+                // Wände dort, wo die Nachbarzelle dieser Schicht fehlt (Außenrand, Durchbruch, Überhang)
+                if (!cellDrawn(i, j - 1, k)) addWall(i, j, i + 1, j, k, 0.0f, -1.0f);
+                if (!cellDrawn(i, j + 1, k)) addWall(i, j + 1, i + 1, j + 1, k, 0.0f, 1.0f);
+                if (!cellDrawn(i - 1, j, k)) addWall(i, j, i, j + 1, k, -1.0f, 0.0f);
+                if (!cellDrawn(i + 1, j, k)) addWall(i + 1, j, i + 1, j + 1, k, 1.0f, 0.0f);
+            }
         }
     }
 
-    mesh.triangles.reserve((resX - 1) * (resY - 1) * 2 + (resX + resY) * 4 + 2);
-    for (int j = 0; j < resY - 1; ++j) {
-        for (int i = 0; i < resX - 1; ++i) {
-            uint32_t i00 = j * resX + i;
-            uint32_t i10 = i00 + 1;
-            uint32_t i01 = (j + 1) * resX + i;
-            uint32_t i11 = i01 + 1;
+    return s;
+}
 
-            mesh.triangles.push_back({i00, i10, i11});
-            mesh.triangles.push_back({i00, i11, i01});
-        }
+Geometry::Mesh StockModel::toMesh() const {
+    Geometry::Mesh mesh(Geometry::MeshRole::Stock, QStringLiteral("Dynamisches Rohteil"));
+    Surface s = buildSurface();
+    if (s.indices.empty()) return mesh;
+
+    mesh.vertices = std::move(s.vertices);
+    mesh.triangles.reserve(s.indices.size() / 3);
+    for (size_t t = 0; t + 2 < s.indices.size(); t += 3) {
+        mesh.triangles.push_back({s.indices[t], s.indices[t + 1], s.indices[t + 2]});
     }
-
-    // 2. Solide blaue Seitenwände nach unten ziehen
-    // Vorne (j = 0)
-    for (int i = 0; i < resX - 1; ++i) {
-        float x1 = static_cast<float>(bounds.minPoint.x + i * dx);
-        float x2 = static_cast<float>(bounds.minPoint.x + (i + 1) * dx);
-        float y = static_cast<float>(bounds.minPoint.y);
-
-        uint32_t top1 = i;
-        uint32_t top2 = i + 1;
-        uint32_t bot1 = static_cast<uint32_t>(mesh.vertices.size());
-        mesh.vertices.push_back({x1, y, bottomZ, 0.0f, -1.0f, 0.0f, sideR, sideG, sideB, sideA});
-        uint32_t bot2 = static_cast<uint32_t>(mesh.vertices.size());
-        mesh.vertices.push_back({x2, y, bottomZ, 0.0f, -1.0f, 0.0f, sideR, sideG, sideB, sideA});
-
-        mesh.triangles.push_back({top1, bot1, bot2});
-        mesh.triangles.push_back({top1, bot2, top2});
-    }
-
-    // Hinten (j = resY - 1)
-    int lastRow = (resY - 1) * resX;
-    for (int i = 0; i < resX - 1; ++i) {
-        float x1 = static_cast<float>(bounds.minPoint.x + i * dx);
-        float x2 = static_cast<float>(bounds.minPoint.x + (i + 1) * dx);
-        float y = static_cast<float>(bounds.maxPoint.y);
-
-        uint32_t top1 = lastRow + i;
-        uint32_t top2 = lastRow + i + 1;
-        uint32_t bot1 = static_cast<uint32_t>(mesh.vertices.size());
-        mesh.vertices.push_back({x1, y, bottomZ, 0.0f, 1.0f, 0.0f, sideR, sideG, sideB, sideA});
-        uint32_t bot2 = static_cast<uint32_t>(mesh.vertices.size());
-        mesh.vertices.push_back({x2, y, bottomZ, 0.0f, 1.0f, 0.0f, sideR, sideG, sideB, sideA});
-
-        mesh.triangles.push_back({top1, top2, bot2});
-        mesh.triangles.push_back({top1, bot2, bot1});
-    }
-
-    // Links (i = 0)
-    for (int j = 0; j < resY - 1; ++j) {
-        float y1 = static_cast<float>(bounds.minPoint.y + j * dy);
-        float y2 = static_cast<float>(bounds.minPoint.y + (j + 1) * dy);
-        float x = static_cast<float>(bounds.minPoint.x);
-
-        uint32_t top1 = j * resX;
-        uint32_t top2 = (j + 1) * resX;
-        uint32_t bot1 = static_cast<uint32_t>(mesh.vertices.size());
-        mesh.vertices.push_back({x, y1, bottomZ, -1.0f, 0.0f, 0.0f, sideR, sideG, sideB, sideA});
-        uint32_t bot2 = static_cast<uint32_t>(mesh.vertices.size());
-        mesh.vertices.push_back({x, y2, bottomZ, -1.0f, 0.0f, 0.0f, sideR, sideG, sideB, sideA});
-
-        mesh.triangles.push_back({top1, bot2, top2});
-        mesh.triangles.push_back({top1, bot1, bot2});
-    }
-
-    // Rechts (i = resX - 1)
-    for (int j = 0; j < resY - 1; ++j) {
-        float y1 = static_cast<float>(bounds.minPoint.y + j * dy);
-        float y2 = static_cast<float>(bounds.minPoint.y + (j + 1) * dy);
-        float x = static_cast<float>(bounds.maxPoint.x);
-
-        uint32_t top1 = j * resX + (resX - 1);
-        uint32_t top2 = (j + 1) * resX + (resX - 1);
-        uint32_t bot1 = static_cast<uint32_t>(mesh.vertices.size());
-        mesh.vertices.push_back({x, y1, bottomZ, 1.0f, 0.0f, 0.0f, sideR, sideG, sideB, sideA});
-        uint32_t bot2 = static_cast<uint32_t>(mesh.vertices.size());
-        mesh.vertices.push_back({x, y2, bottomZ, 1.0f, 0.0f, 0.0f, sideR, sideG, sideB, sideA});
-
-        mesh.triangles.push_back({top1, top2, bot2});
-        mesh.triangles.push_back({top1, bot2, bot1});
-    }
-
-    // 3. Blaue Bodenfläche (2 Dreiecke)
-    float minX = static_cast<float>(bounds.minPoint.x);
-    float maxX = static_cast<float>(bounds.maxPoint.x);
-    float minY = static_cast<float>(bounds.minPoint.y);
-    float maxY = static_cast<float>(bounds.maxPoint.y);
-
-    uint32_t b00 = static_cast<uint32_t>(mesh.vertices.size());
-    mesh.vertices.push_back({minX, minY, bottomZ, 0.0f, 0.0f, -1.0f, botR, botG, botB, botA});
-    uint32_t b10 = static_cast<uint32_t>(mesh.vertices.size());
-    mesh.vertices.push_back({maxX, minY, bottomZ, 0.0f, 0.0f, -1.0f, botR, botG, botB, botA});
-    uint32_t b11 = static_cast<uint32_t>(mesh.vertices.size());
-    mesh.vertices.push_back({maxX, maxY, bottomZ, 0.0f, 0.0f, -1.0f, botR, botG, botB, botA});
-    uint32_t b01 = static_cast<uint32_t>(mesh.vertices.size());
-    mesh.vertices.push_back({minX, maxY, bottomZ, 0.0f, 0.0f, -1.0f, botR, botG, botB, botA});
-
-    mesh.triangles.push_back({b00, b10, b11});
-    mesh.triangles.push_back({b00, b11, b01});
-
     mesh.computeBoundingBox();
-    mesh.computeNormals();
     return mesh;
+}
+
+double StockModel::materialVolume() const {
+    const size_t n = static_cast<size_t>(resX) * resY;
+    if (!bounds.isValid() || resX < 2 || resY < 2 || layerCount.size() != n) return 0.0;
+
+    const double dx = bounds.widthX() / (resX - 1);
+    const double dy = bounds.depthY() / (resY - 1);
+    double sum = 0.0;
+    for (int j = 0; j < resY; ++j) {
+        const double wy = (j == 0 || j == resY - 1) ? 0.5 : 1.0;
+        for (int i = 0; i < resX; ++i) {
+            const double wx = (i == 0 || i == resX - 1) ? 0.5 : 1.0;
+            const size_t p = static_cast<size_t>(j) * resX + i;
+            double thickness = 0.0;
+            for (int k = 0; k < layerCount[p]; ++k) {
+                thickness += layerHi[p * kMaxLayers + k] - layerLo[p * kMaxLayers + k];
+            }
+            sum += wx * wy * thickness;
+        }
+    }
+    return sum * dx * dy;
 }
 
 } // namespace GeminiCNC::Simulation

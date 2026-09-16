@@ -50,20 +50,10 @@ void Viewport3D::setSelectableContours(const std::vector<Geometry::Contour>& con
 }
 
 void Viewport3D::updateDynamicStock(const Simulation::StockModel& stockModel) {
-    makeCurrent();
-    if (!m_gpuStockModel) {
-        m_gpuStockModel = std::make_unique<GPUStockModel>();
-        m_gpuStockModel->initializeGL();
-        m_gpuStockModel->initFromCPU(stockModel);
-    } else {
-        if (!m_gpuStockModel->isInitialized()) {
-             m_gpuStockModel->initializeGL();
-             m_gpuStockModel->initFromCPU(stockModel);
-        } else {
-             m_gpuStockModel->updateFromCPU(stockModel);
-        }
-    }
-    doneCurrent();
+    // Oberfläche erst beim nächsten Zeichnen aufbauen: mehrere Abtrag-Ticks pro Bild
+    // werden so zu einem einzigen GPU-Upload zusammengefasst
+    m_dynamicStockSource = &stockModel;
+    m_dynamicStockDirty = true;
     m_useDynamicStock = true;
     update();
 }
@@ -182,6 +172,13 @@ void Viewport3D::paintGL() {
             case 4: stockColor = QColor(240, 240, 235); spec = 0.3f; shin = 16.0f; break; // POM
             case 5: stockColor = QColor(185, 195, 210); spec = 0.95f; shin = 160.0f; break; // Edelstahl
             default: stockColor = QColor(200, 205, 215); spec = 0.7f; shin = 64.0f; break; // Default
+        }
+
+        if (m_useDynamicStock && m_dynamicStockDirty && m_dynamicStockSource) {
+            if (!m_gpuStockModel) m_gpuStockModel = std::make_unique<GPUStockModel>();
+            if (!m_gpuStockModel->isInitialized()) m_gpuStockModel->initializeGL();
+            m_gpuStockModel->updateFromCPU(*m_dynamicStockSource);
+            m_dynamicStockDirty = false;
         }
 
         if (m_useDynamicStock && m_gpuStockModel && m_gpuStockModel->isInitialized() && m_hybridShader) {

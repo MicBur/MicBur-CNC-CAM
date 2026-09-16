@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QTimer>
+#include <QList>
 #include <memory>
 #include "core/Vector3D.h"
 #include "core/ToolDefinition.h"
@@ -33,7 +34,10 @@ public:
 
     void setToolpath(const CAM::Toolpath& toolpath);
     void setActiveTool(const Core::ToolDefinition& tool);
+    void setToolLibrary(const QList<Core::ToolDefinition>& tools);
     void setStockBounds(const Core::BoundingBox& stockBounds);
+    void setCylinderStock(const Core::BoundingBox& stockBounds, double radius);
+    void setMeshStock(const Geometry::Mesh& stockMesh);  // vorgefrästes STL-Rohteil
 
     [[nodiscard]] SimState state() const { return m_state; }
     [[nodiscard]] Core::Vector3D currentPosition() const { return m_currentPos; }
@@ -57,16 +61,20 @@ signals:
     void collisionDetected(const CAM::CollisionViolation& violation);
     void simulationFinished();
     void stockUpdated();
+    void activeToolChanged(const Core::ToolDefinition& tool);
 
 private slots:
     void onTick();
 
 private:
     void updateSegmentMovement(double dtSec);
+    void checkToolChange(int segToolId);
 
     SimState m_state{SimState::Idle};
     CAM::Toolpath m_toolpath;
     Core::ToolDefinition m_activeTool;
+    QList<Core::ToolDefinition> m_toolLibrary;
+    int m_lastEmittedToolId{-1};
     StockModel m_stockModel;
 
     Core::Vector3D m_currentPos{0.0, 0.0, 20.0, 0.0};
