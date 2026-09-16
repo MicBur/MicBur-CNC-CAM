@@ -51,14 +51,12 @@ public:
     std::vector<ToolMark> marks; // resX * resY
 
     /**
-     * Genaue Lage der gefrästen Kante zwischen den Rasterpunkten (je Punkt).
-     * out*: Punkt blieb stehen, der Fräser lief tiefer vorbei → Verschiebung auf die Schneidenbahn (Oberkante der Wand).
-     * in*:  Punkt wurde abgetragen → Verschiebung auf den Rand des Fräsers (Wandfuß).
-     * Die Darstellung verschiebt Randpunkte darauf, so werden Radien und Schrägen glatt statt treppenförmig.
+     * Genaue Lage der gefrästen Kante zwischen den Rasterpunkten (je Punkt):
+     * Punkt blieb stehen, der Fräser lief tiefer vorbei → Vektor zur nächsten Schneidenbahn (outX/outY, Länge outClear).
+     * buildSurface() setzt die Wand damit auf jeder Zellkante an die richtige Stelle (glatte Radien und Schrägen).
      */
     struct EdgeHint {
         float outX{0.0f}, outY{0.0f}, outClear{1e9f};
-        float inX{0.0f}, inY{0.0f}, inDepth{-1.0f};
     };
     std::vector<EdgeHint> edgeHints; // resX * resY
 

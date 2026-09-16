@@ -325,18 +325,7 @@ void StockModel::carveSegment(const Core::Vector3D& p0, const Core::Vector3D& p1
                 cutColors[idx] = colorRgba;
             }
 
-            // Abgetragener Punkt: Abstand zum Fräserrand (Wandfuß) merken
-            {
-                const bool touching = count > 0 && layerHi[idx * kMaxLayers + count - 1] >= cutZf - 0.02f;
-                const double dist = std::sqrt(distSq);
-                const float depth = static_cast<float>(radius - dist);
-                if (changed) hint.outClear = 1e9f; // neue Oberkante: frühere Nachbarschnitte gelten nicht mehr
-                if (changed || (touching && depth > hint.inDepth)) {
-                    hint.inDepth = depth;
-                    hint.inX = dist > 1e-9 ? static_cast<float>(dX / dist) * depth : 0.0f;
-                    hint.inY = dist > 1e-9 ? static_cast<float>(dY / dist) * depth : 0.0f;
-                }
-            }
+            if (changed) hint.outClear = 1e9f; // neue Oberkante: frühere Nachbarschnitte gelten nicht mehr
 
             // Bearbeitungsspur merken: bei Abtrag oder wenn der Fräser die Fläche nur überstreicht (Schlichten)
             const bool touches = count > 0 && layerHi[idx * kMaxLayers + count - 1] >= cutZf - 0.02f;
@@ -443,54 +432,7 @@ StockModel::Surface StockModel::buildSurface() const {
         return sh;
     };
 
-    // Lage eines Randpunkts auf der tatsächlichen Schneidenbahn (statt auf dem Raster)
-    const float maxShift = 0.95f * static_cast<float>(std::min(dx, dy));
     const bool haveHints = edgeHints.size() == n;
-    auto vertexXY = [&](int i, int j, int k, bool top, float& x, float& y) {
-        x = px(i);
-        y = py(j);
-        if (!haveHints) return;
-        const size_t p = static_cast<size_t>(j) * resX + i;
-        if (k != layerCount[p] - 1) return;
-
-        float maxDrop = 0.0f;
-        float maxRise = 0.0f;
-        const float z = top ? hi(i, j, k) : lo(i, j, k);
-        for (int dj = -1; dj <= 1; ++dj) {
-            for (int di = -1; di <= 1; ++di) {
-                if (di == 0 && dj == 0) continue;
-                const int ii = i + di, jj = j + dj;
-                if (ii < 0 || jj < 0 || ii >= resX || jj >= resY) continue;
-                if (!has(ii, jj, k)) {
-                    maxDrop = 1e9f; // Durchbruch neben diesem Punkt
-                    continue;
-                }
-                if (!top) continue;
-                const float nz = hi(ii, jj, k);
-                maxDrop = std::max(maxDrop, z - nz);
-                maxRise = std::max(maxRise, nz - z);
-            }
-        }
-
-        const EdgeHint& h = edgeHints[p];
-        float sx = 0.0f, sy = 0.0f;
-        if (maxDrop > wallStep && maxDrop >= maxRise && h.outClear < 1e8f) {
-            sx = h.outX;
-            sy = h.outY;
-        } else if (top && maxRise > wallStep && h.inDepth >= 0.0f) {
-            sx = h.inX;
-            sy = h.inY;
-        } else {
-            return;
-        }
-        const float len = std::sqrt(sx * sx + sy * sy);
-        if (len > maxShift) {
-            sx *= maxShift / len;
-            sy *= maxShift / len;
-        }
-        x += sx;
-        y += sy;
-    };
 
     std::vector<uint32_t> topIdx(n * L, kNoVertex);
     std::vector<uint32_t> botIdx(n * L, kNoVertex);
@@ -511,12 +453,11 @@ StockModel::Surface StockModel::buildSurface() const {
         const size_t p = static_cast<size_t>(j) * resX + i;
         uint32_t& slot = topIdx[p * L + k];
         if (slot == kNoVertex) {
-            float nx, ny, nz, r, g, b, a, x, y;
+            float nx, ny, nz, r, g, b, a;
             surfaceNormal(i, j, k, true, nx, ny, nz);
             topColor(i, j, k, r, g, b, a);
-            vertexXY(i, j, k, true, x, y);
             slot = static_cast<uint32_t>(s.vertices.size());
-            s.vertices.push_back({x, y, hi(i, j, k), nx, ny, nz, r, g, b, a});
+            s.vertices.push_back({px(i), py(j), hi(i, j, k), nx, ny, nz, r, g, b, a});
             s.shading.push_back(shadingAt(i, j, k));
         }
         return slot;
@@ -525,11 +466,10 @@ StockModel::Surface StockModel::buildSurface() const {
         const size_t p = static_cast<size_t>(j) * resX + i;
         uint32_t& slot = botIdx[p * L + k];
         if (slot == kNoVertex) {
-            float nx, ny, nz, x, y;
+            float nx, ny, nz;
             surfaceNormal(i, j, k, false, nx, ny, nz);
-            vertexXY(i, j, k, false, x, y);
             slot = static_cast<uint32_t>(s.vertices.size());
-            s.vertices.push_back({x, y, lo(i, j, k), nx, ny, nz, botR, botG, botB, botA});
+            s.vertices.push_back({px(i), py(j), lo(i, j, k), nx, ny, nz, botR, botG, botB, botA});
             s.shading.push_back(VertexShading{});
         }
         return slot;
@@ -546,33 +486,11 @@ StockModel::Surface StockModel::buildSurface() const {
         const float ba = lo(ia, ja, k), bb = lo(ib, jb, k);
         if (ta - ba < kMinLayerThickness && tb - bb < kMinLayerThickness) return;
 
-        float xa, ya, xb, yb, xab, yab, xbb, ybb;
-        vertexXY(ia, ja, k, true, xa, ya);
-        vertexXY(ib, jb, k, true, xb, yb);
-        vertexXY(ia, ja, k, false, xab, yab);
-        vertexXY(ib, jb, k, false, xbb, ybb);
-
-        // Normale senkrecht zur (verschobenen) Wand, gleiche Seite wie die Rasternormale
-        float ex = xb - xa, ey = yb - ya;
-        float wnx = ey, wny = -ex;
-        const float wlen = std::sqrt(wnx * wnx + wny * wny);
-        if (wlen > 1e-6f) {
-            wnx /= wlen;
-            wny /= wlen;
-            if (wnx * nx + wny * ny < 0.0f) {
-                wnx = -wnx;
-                wny = -wny;
-            }
-        } else {
-            wnx = nx;
-            wny = ny;
-        }
-
         const uint32_t base = static_cast<uint32_t>(s.vertices.size());
-        s.vertices.push_back({xab, yab, ba, wnx, wny, 0.0f, sideR, sideG, sideB, sideA});
-        s.vertices.push_back({xbb, ybb, bb, wnx, wny, 0.0f, sideR, sideG, sideB, sideA});
-        s.vertices.push_back({xb, yb, tb, wnx, wny, 0.0f, sideR, sideG, sideB, sideA});
-        s.vertices.push_back({xa, ya, ta, wnx, wny, 0.0f, sideR, sideG, sideB, sideA});
+        s.vertices.push_back({px(ia), py(ja), ba, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
+        s.vertices.push_back({px(ib), py(jb), bb, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
+        s.vertices.push_back({px(ib), py(jb), tb, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
+        s.vertices.push_back({px(ia), py(ja), ta, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
 
         // Wandfuß stärker verdeckt als die Oberkante; Spuren wie am angrenzenden Punkt
         const VertexShading shA = shadingAt(ia, ja, k);
@@ -587,8 +505,8 @@ StockModel::Surface StockModel::buildSurface() const {
         s.shading.push_back(shA);
 
         // Umlaufsinn so wählen, dass die Dreiecksnormale nach außen zeigt
-        ex = px(ib) - px(ia);
-        ey = py(jb) - py(ja);
+        const float ex = px(ib) - px(ia);
+        const float ey = py(jb) - py(ja);
         if (ey * nx - ex * ny > 0.0f) {
             addTri(base, base + 1, base + 2);
             addTri(base, base + 2, base + 3);
@@ -598,44 +516,165 @@ StockModel::Surface StockModel::buildSurface() const {
         }
     };
 
-    // Steile Zelle (Fräswand zwischen Oberkante und Boden): eigene Eckpunkte mit Wandnormale,
-    // damit Oberseite und Boden scharfkantig bleiben
-    auto addSteepCell = [&](int i, int j, int k) {
+    // ── Steile Zelle (Fräswand zwischen Oberkante und Boden) wie bei Marching Squares zerlegen ──
+    // Auf jeder Zellkante zwischen hohem und tiefem Eckpunkt liegt die Wand genau dort, wo die Schneide
+    // vorbeilief (Abstand aus edgeHints des hohen Punkts). Oberseite und Boden enden an diesen Schnittpunkten,
+    // dazwischen steht eine senkrechte Wand → glatte Radien, Schrägen und Bohrungen statt Treppen.
+    struct CellPoint {
+        float x, y;      // Lage in XY
+        int corner;      // Eckpunkt (0..3), von dem Höhe, Normale und Darstellungsdaten stammen
+    };
+    auto addSteepCell = [&](int i, int j, int k, float zMin, float zMax) {
         const int ci[4] = {i, i + 1, i + 1, i};
         const int cj[4] = {j, j, j + 1, j + 1};
-        float X[4], Y[4], Z[4];
+        const float zMid = 0.5f * (zMin + zMax);
+        float Z[4];
+        bool high[4];
         for (int c = 0; c < 4; ++c) {
-            vertexXY(ci[c], cj[c], k, true, X[c], Y[c]);
             Z[c] = hi(ci[c], cj[c], k);
+            high[c] = Z[c] > zMid;
         }
-        // Flächennormale aus den Diagonalen (0→2, 1→3)
-        const float ax = X[2] - X[0], ay = Y[2] - Y[0], az = Z[2] - Z[0];
-        const float bx = X[3] - X[1], by = Y[3] - Y[1], bz = Z[3] - Z[1];
-        float nx = ay * bz - az * by;
-        float ny = az * bx - ax * bz;
-        float nz = ax * by - ay * bx;
-        float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-        if (len < 1e-9f) { nx = 0.0f; ny = 0.0f; nz = 1.0f; len = 1.0f; }
-        // Richtung: vom hohen zum tiefen Rand (in die Tasche hinein)
-        const float gx = -((Z[1] + Z[2]) - (Z[0] + Z[3])) / static_cast<float>(2.0 * dx);
-        const float gy = -((Z[2] + Z[3]) - (Z[0] + Z[1])) / static_cast<float>(2.0 * dy);
-        if (nx * gx + ny * gy + nz < 0.0f) len = -len;
-        nx /= len; ny /= len; nz /= len;
 
-        const uint32_t base = static_cast<uint32_t>(s.vertices.size());
-        for (int c = 0; c < 4; ++c) {
+        // Schnittpunkt der Wand auf der Kante c → c+1 (einer der beiden Punkte ist hoch, der andere tief)
+        auto crossing = [&](int c) {
+            const int d = (c + 1) % 4;
+            const int h = high[c] ? c : d;
+            const int t = high[c] ? d : c;
+            const float hx = px(ci[h]), hy = py(cj[h]);
+            const float ex = px(ci[t]) - hx, ey = py(cj[t]) - hy;
+            const float edgeLen = std::sqrt(ex * ex + ey * ey);
+            float along = 0.5f * edgeLen;
+            if (haveHints) {
+                const EdgeHint& hint = edgeHints[static_cast<size_t>(cj[h]) * resX + ci[h]];
+                if (hint.outClear < 1e8f) {
+                    // Schneidenbahn als Gerade senkrecht zum Hinweisvektor im Abstand |v| → Schnitt mit der Kante
+                    const float vv = hint.outX * hint.outX + hint.outY * hint.outY;
+                    const float ve = (hint.outX * ex + hint.outY * ey) / std::max(edgeLen, 1e-6f);
+                    if (vv < 1e-12f) {
+                        along = 0.0f;
+                    } else if (ve > 1e-6f) {
+                        along = vv / ve;
+                    }
+                }
+            }
+            along = std::clamp(along, 0.02f * edgeLen, 0.98f * edgeLen);
+            const float f = along / std::max(edgeLen, 1e-6f);
+            return CellPoint{hx + ex * f, hy + ey * f, h};
+        };
+
+        auto emitVertex = [&](const CellPoint& pt, bool top, float nx, float ny, float nz, float aoScale) {
+            const int c = pt.corner;
             float r, g, b, a;
             topColor(ci[c], cj[c], k, r, g, b, a);
-            s.vertices.push_back({X[c], Y[c], Z[c], nx, ny, nz, r, g, b, a});
-            s.shading.push_back(shadingAt(ci[c], cj[c], k));
+            VertexShading sh = shadingAt(ci[c], cj[c], k);
+            sh.ao *= aoScale;
+            s.vertices.push_back({pt.x, pt.y, Z[c], nx, ny, nz, r, g, b, a});
+            s.shading.push_back(sh);
+            (void)top;
+            return static_cast<uint32_t>(s.vertices.size() - 1);
+        };
+
+        // Fläche (Oberseite oder Boden) aus Eckpunkten und Schnittpunkten, konvex → Fächer
+        auto emitPolygon = [&](const std::vector<CellPoint>& poly) {
+            if (poly.size() < 3) return;
+            std::vector<uint32_t> ids;
+            ids.reserve(poly.size());
+            for (const auto& pt : poly) {
+                float nx, ny, nz;
+                surfaceNormal(ci[pt.corner], cj[pt.corner], k, true, nx, ny, nz);
+                ids.push_back(emitVertex(pt, true, nx, ny, nz, 1.0f));
+            }
+            for (size_t q = 1; q + 1 < ids.size(); ++q) addTri(ids[0], ids[q], ids[q + 1]);
+        };
+
+        // Senkrechte Wand zwischen zwei Schnittpunkten; Normale zeigt vom hohen zum tiefen Bereich
+        auto emitCutWall = [&](const CellPoint& a, const CellPoint& b, int lowCornerA, int lowCornerB, float towardX, float towardY) {
+            float wx = b.y - a.y, wy = -(b.x - a.x);
+            const float len = std::sqrt(wx * wx + wy * wy);
+            if (len < 1e-6f) return;
+            wx /= len;
+            wy /= len;
+            if (wx * towardX + wy * towardY < 0.0f) { wx = -wx; wy = -wy; }
+
+            const CellPoint aLow{a.x, a.y, lowCornerA};
+            const CellPoint bLow{b.x, b.y, lowCornerB};
+            const uint32_t v0 = emitVertex(aLow, false, wx, wy, 0.0f, 0.45f);
+            const uint32_t v1 = emitVertex(bLow, false, wx, wy, 0.0f, 0.45f);
+            const uint32_t v2 = emitVertex(b, false, wx, wy, 0.0f, 1.0f);
+            const uint32_t v3 = emitVertex(a, false, wx, wy, 0.0f, 1.0f);
+            // Umlaufsinn: Dreiecksnormale = Wandnormale
+            const float ex = b.x - a.x, ey = b.y - a.y;
+            if (ey * wx - ex * wy > 0.0f) {
+                addTri(v0, v1, v2);
+                addTri(v0, v2, v3);
+            } else {
+                addTri(v0, v2, v1);
+                addTri(v0, v3, v2);
+            }
+        };
+
+        const int highCount = int(high[0]) + int(high[1]) + int(high[2]) + int(high[3]);
+        const bool saddle = highCount == 2 && high[0] == high[2];
+
+        // Tiefster Eckpunkt einer Kante (für die Höhe des Wandfußes)
+        auto lowCornerOfEdge = [&](int c) { return high[c] ? (c + 1) % 4 : c; };
+
+        if (saddle) {
+            // Zwei gegenüberliegende hohe Ecken: jede bekommt ein Dreieck, der tiefe Bereich die Mitte
+            std::vector<CellPoint> lowPoly;
+            for (int c = 0; c < 4; ++c) {
+                const int prev = (c + 3) % 4;
+                if (high[c]) {
+                    const CellPoint xa = crossing(prev);
+                    const CellPoint xb = crossing(c);
+                    emitPolygon({xa, CellPoint{px(ci[c]), py(cj[c]), c}, xb});
+                    float tx = 0.5f * (px(i) + px(i + 1)) - px(ci[c]);
+                    float ty = 0.5f * (py(j) + py(j + 1)) - py(cj[c]);
+                    emitCutWall(xa, xb, lowCornerOfEdge(prev), lowCornerOfEdge(c), tx, ty);
+                } else {
+                    CellPoint xa = crossing(prev);
+                    CellPoint xb = crossing(c);
+                    xa.corner = c;
+                    xb.corner = c;
+                    lowPoly.push_back(xa);
+                    lowPoly.push_back(CellPoint{px(ci[c]), py(cj[c]), c});
+                    lowPoly.push_back(xb);
+                }
+            }
+            emitPolygon(lowPoly);
+            return;
         }
-        // Diagonale mit dem kleineren Höhenunterschied: Wand folgt der Kontur statt Zickzack
-        if (std::abs(Z[0] - Z[2]) <= std::abs(Z[1] - Z[3])) {
-            addTri(base, base + 1, base + 2);
-            addTri(base, base + 2, base + 3);
-        } else {
-            addTri(base, base + 1, base + 3);
-            addTri(base + 1, base + 2, base + 3);
+
+        // Ein zusammenhängender hoher und tiefer Bereich: Rand der Zelle umlaufen
+        std::vector<CellPoint> highPoly, lowPoly;
+        std::vector<CellPoint> cuts;
+        std::vector<int> cutLow;
+        for (int c = 0; c < 4; ++c) {
+            const CellPoint cornerPt{px(ci[c]), py(cj[c]), c};
+            (high[c] ? highPoly : lowPoly).push_back(cornerPt);
+            const int d = (c + 1) % 4;
+            if (high[c] != high[d]) {
+                CellPoint x = crossing(c);
+                highPoly.push_back(x);
+                CellPoint xLow = x;
+                xLow.corner = high[c] ? d : c;
+                lowPoly.push_back(xLow);
+                cuts.push_back(x);
+                cutLow.push_back(xLow.corner);
+            }
+        }
+        emitPolygon(highPoly);
+        emitPolygon(lowPoly);
+        if (cuts.size() == 2) {
+            float hxSum = 0.0f, hySum = 0.0f, lxSum = 0.0f, lySum = 0.0f;
+            int hc = 0, lc = 0;
+            for (int c = 0; c < 4; ++c) {
+                if (high[c]) { hxSum += px(ci[c]); hySum += py(cj[c]); ++hc; }
+                else { lxSum += px(ci[c]); lySum += py(cj[c]); ++lc; }
+            }
+            const float tx = lxSum / std::max(lc, 1) - hxSum / std::max(hc, 1);
+            const float ty = lySum / std::max(lc, 1) - hySum / std::max(hc, 1);
+            emitCutWall(cuts[0], cuts[1], cutLow[0], cutLow[1], tx, ty);
         }
     };
 
@@ -649,7 +688,7 @@ StockModel::Surface StockModel::buildSurface() const {
                 const float zMin = std::min({z00, z10, z01, z11});
                 const float zMax = std::max({z00, z10, z01, z11});
                 if (zMax - zMin > wallStep) {
-                    addSteepCell(i, j, k);
+                    addSteepCell(i, j, k, zMin, zMax);
                 } else {
                     const uint32_t t00 = topVertex(i, j, k), t10 = topVertex(i + 1, j, k);
                     const uint32_t t01 = topVertex(i, j + 1, k), t11 = topVertex(i + 1, j + 1, k);

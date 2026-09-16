@@ -1,9 +1,11 @@
 // Rendert ein simuliert gefrästes Beispielteil mit dem echten 3D-Viewport in PNG-Dateien.
-// Aufruf: RenderPreview <Ausgabeordner>   (zur Sichtprüfung von Material, Schatten und Fräserspuren)
+// Aufruf: RenderPreview <Ausgabeordner> [Rasterauflösung=200] [Zoomschritte nah=14] [Fokus X] [Fokus Y]
+// (zur Sichtprüfung von Material, Schatten, Fräserspuren und Kanten)
 #include <QApplication>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QWheelEvent>
+#include <cstdlib>
 #include <iostream>
 
 #include "cam/ConversationalProgram.h"
@@ -34,14 +36,24 @@ void zoom(UI::Viewport3D& vp, int steps) {
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     const QString outDir = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QDir::currentPath();
+    const int resolution = argc > 2 ? std::atoi(argv[2]) : 200;   // wie im Programm
+    const int zoomSteps = argc > 3 ? std::atoi(argv[3]) : 14;
+    // Kamera blickt auf den Nullpunkt: das Teil so verschieben, dass der Fokuspunkt dort liegt
+    const double focusX = argc > 4 ? std::atof(argv[4]) : 0.0;
+    const double focusY = argc > 5 ? std::atof(argv[5]) : 0.0;
 
     // Beispielprogramm fräsen (Planen, Tasche, Bohrungen, Außenkontur)
     const auto tools = Core::ToolDefinition::createDefaultLibrary();
-    const Core::BoundingBox stockBounds({-5, -5, -20}, {85, 55, 0.5});
+    const Core::BoundingBox partBounds({-5, -5, -20}, {85, 55, 0.5});
     auto program = CAM::ConversationalProgram::createSampleProgram();
-    const auto toolpath = program.generateFullToolpath(tools, stockBounds);
+    auto toolpath = program.generateFullToolpath(tools, partBounds);
+    const Core::BoundingBox stockBounds({-5 - focusX, -5 - focusY, -20}, {85 - focusX, 55 - focusY, 0.5});
+    for (auto& seg : toolpath.segments) {
+        seg.startPos.x -= focusX; seg.endPos.x -= focusX;
+        seg.startPos.y -= focusY; seg.endPos.y -= focusY;
+    }
 
-    Simulation::StockModel stock(stockBounds, 360);
+    Simulation::StockModel stock(stockBounds, resolution);
     for (const auto& seg : toolpath.segments) {
         double diameter = seg.toolDiameter;
         int kind = 1;
@@ -78,7 +90,7 @@ int main(int argc, char* argv[]) {
             vp.grabFramebuffer().save(QDir(outDir).filePath(QString("render_%1_q%2.png").arg(presetNames[m]).arg(quality)));
         }
         vp.setRenderQuality(2);
-        zoom(vp, 14);
+        zoom(vp, zoomSteps);
         waitFrames(400);
         vp.grabFramebuffer().save(QDir(outDir).filePath(QString("render_%1_nah.png").arg(presetNames[m])));
     }

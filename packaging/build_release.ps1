@@ -23,8 +23,11 @@ $env:PATH = "$QtBin;G:\Qt\Tools\mingw1310_64\bin;G:\Qt\Tools\Ninja;$env:PATH"
 function Step($text) { Write-Host "`n=== $text ===" -ForegroundColor Cyan }
 
 Step 'Programm bauen'
-if (Get-Process -Name 'GeminiCNC', 'MicBur-CNC-CAM' -ErrorAction SilentlyContinue) {
-    throw 'MicBur-CNC-CAM läuft noch – bitte zuerst schließen.'
+# Nur Programme aus dem Build- oder Paketordner blockieren das Überschreiben (installierte Version darf laufen)
+$blocking = Get-Process -Name 'GeminiCNC', 'MicBur-CNC-CAM' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and ($_.Path.StartsWith($Build, 'OrdinalIgnoreCase') -or $_.Path.StartsWith($Out, 'OrdinalIgnoreCase')) }
+if ($blocking) {
+    throw 'MicBur-CNC-CAM läuft noch aus dem Build-Ordner – bitte zuerst schließen.'
 }
 & ninja -C $Build
 if ($LASTEXITCODE -ne 0) { throw 'Build fehlgeschlagen' }
@@ -55,8 +58,13 @@ Copy-Item (Join-Path $Root 'resources\icons\app_icon.ico') $Stage
 Step 'Installer erstellen'
 & python (Join-Path $PSScriptRoot 'make_wizard_images.py') $Out
 if ($LASTEXITCODE -ne 0) { throw 'Assistentenbilder fehlgeschlagen' }
-& $Iscc /Q (Join-Path $Root 'installer.iss')
+# Im Temp-Ordner erzeugen und dann verschieben: Virenscanner sperren sonst gelegentlich die neue .exe
+# im Ausgabeordner, während Inno Setup das Symbol einträgt ("EndUpdateResource failed")
+$IsccOut = Join-Path $env:TEMP 'MicBur-CNC-CAM_Setup'
+New-Item -ItemType Directory -Force $IsccOut | Out-Null
+& $Iscc /Q "/O$IsccOut" (Join-Path $Root 'installer.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Inno Setup fehlgeschlagen' }
+Move-Item (Join-Path $IsccOut "MicBur-CNC-CAM_${Version}_Setup.exe") $Out -Force
 
 Step 'Portable ZIP erstellen'
 if (Test-Path $Portable) { Remove-Item $Portable -Recurse -Force }
