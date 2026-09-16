@@ -42,6 +42,7 @@ struct PathSegment {
 
     // Bohrzyklus (nur Bohrblöcke): 0..5 = G81/G83/G73/G84/G85/G86, -1 = kein Zyklus
     int drillCycle{-1};
+    int drillOperation{-1};     // laufender Bohrvorgang innerhalb des Blocks
     int drillHole{-1};          // laufende Bohrungsnummer innerhalb des Blocks
     double drillDepthZ{0.0};    // Endtiefe Z
     double drillRPlaneZ{0.0};   // R-Ebene

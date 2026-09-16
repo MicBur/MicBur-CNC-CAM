@@ -390,7 +390,7 @@ QString PostProcessor::process(const Toolpath& toolpath,
             double drillFeed = 0.0;
             int lastHole = -1;
             size_t j = i;
-            while (j < segs.size() && segs[j].drillCycle == seg.drillCycle
+            while (j < segs.size() && segs[j].drillCycle == seg.drillCycle && segs[j].drillOperation == seg.drillOperation
                    && segs[j].blockId == seg.blockId && segs[j].toolId == seg.toolId) {
                 if (segs[j].drillHole != lastHole) {
                     holes.push_back(&segs[j]);

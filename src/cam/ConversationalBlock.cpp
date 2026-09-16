@@ -1,6 +1,7 @@
 #include "ConversationalBlock.h"
 #include "ToolpathGenerator.h"
 #include "geometry/StlLoader.h"
+#include <algorithm>
 #include <cmath>
 #include <QJsonArray>
 
@@ -63,7 +64,8 @@ QString blockTypeToString(BlockType type) {
         case BlockType::Pocket: return QStringLiteral("Taschenfräsen");
         case BlockType::Slot: return QStringLiteral("Langloch");
         case BlockType::HelixThread: return QStringLiteral("Helix / Gewinde");
-        case BlockType::Drill: return QStringLiteral("Bohrbild");
+        case BlockType::Drill: return QStringLiteral("Bohrungen");
+        case BlockType::DrillPositions: return QStringLiteral("Bohrpositionen");
         case BlockType::Stl3D: return QStringLiteral("3D-STL Fräsen");
         case BlockType::RawNC: return QStringLiteral("NC-Merge");
         case BlockType::PatternStart: return QStringLiteral("Muster Start");
@@ -81,6 +83,7 @@ static QString blockTypeKey(BlockType type) {
         case BlockType::Slot: return QStringLiteral("Slot");
         case BlockType::HelixThread: return QStringLiteral("HelixThread");
         case BlockType::Drill: return QStringLiteral("Drill");
+        case BlockType::DrillPositions: return QStringLiteral("DrillPositions");
         case BlockType::Stl3D: return QStringLiteral("Stl3D");
         case BlockType::RawNC: return QStringLiteral("RawNC");
         case BlockType::PatternStart: return QStringLiteral("PatternStart");
@@ -96,7 +99,8 @@ BlockType stringToBlockType(const QString& str) {
     if (str == QStringLiteral("Pocket") || str == QStringLiteral("Taschenfräsen") || str == QStringLiteral("TaschenfrÃ¤sen")) return BlockType::Pocket;
     if (str == QStringLiteral("Slot") || str == QStringLiteral("Langloch")) return BlockType::Slot;
     if (str == QStringLiteral("HelixThread") || str == QStringLiteral("Helix / Gewinde")) return BlockType::HelixThread;
-    if (str == QStringLiteral("Drill") || str == QStringLiteral("Bohrbild")) return BlockType::Drill;
+    if (str == QStringLiteral("Drill") || str == QStringLiteral("Bohrbild") || str == QStringLiteral("Bohrungen")) return BlockType::Drill;
+    if (str == QStringLiteral("DrillPositions") || str == QStringLiteral("Bohrpositionen")) return BlockType::DrillPositions;
     if (str == QStringLiteral("Stl3D") || str == QStringLiteral("3D-STL Fräsen") || str == QStringLiteral("3D-STL FrÃ¤sen")) return BlockType::Stl3D;
     if (str == QStringLiteral("PatternStart") || str == QStringLiteral("Muster Start")) return BlockType::PatternStart;
     if (str == QStringLiteral("PatternEnd") || str == QStringLiteral("Muster Ende")) return BlockType::PatternEnd;
@@ -124,6 +128,172 @@ StlMillingStrategy stringToStlStrategy(const QString& str) {
     if (str == "RasterXY") return StlMillingStrategy::RasterXY;
     if (str == "WaterlineFinish") return StlMillingStrategy::WaterlineFinish;
     return StlMillingStrategy::RoughAndFinishX;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Bohrvorgänge (Hurco WinMax Bohrungen-Datensatz)
+// ═══════════════════════════════════════════════════════════
+
+QString drillOperationName(DrillOperationType type) {
+    switch (type) {
+        case DrillOperationType::Drill:       return QStringLiteral("Bohrer");
+        case DrillOperationType::CenterDrill: return QStringLiteral("Zentrieren");
+        case DrillOperationType::SpotFace:    return QStringLiteral("Flachsenken");
+        case DrillOperationType::NcSpotDrill: return QStringLiteral("NC-Anbohren");
+        case DrillOperationType::Countersink: return QStringLiteral("Kegelsenken");
+        case DrillOperationType::PeckDrill:   return QStringLiteral("Tieflochbohrer");
+        case DrillOperationType::CustomDrill: return QStringLiteral("Benutzerdef. Bohren");
+        case DrillOperationType::Tap:         return QStringLiteral("Gewindebohrer");
+        case DrillOperationType::RigidTap:    return QStringLiteral("Synchron-Gewindebohren");
+        case DrillOperationType::Bore:        return QStringLiteral("Ausdrehen");
+        case DrillOperationType::Ream:        return QStringLiteral("Reiben");
+    }
+    return QStringLiteral("Bohrer");
+}
+
+bool DrillOperation::usesDrillCycleType() const {
+    return type == DrillOperationType::Drill || type == DrillOperationType::PeckDrill
+        || type == DrillOperationType::CustomDrill;
+}
+
+bool DrillOperation::usesDiameter() const {
+    return type == DrillOperationType::CenterDrill || type == DrillOperationType::NcSpotDrill
+        || type == DrillOperationType::Countersink;
+}
+
+double DrillOperation::bottomZ(double blockStartZ, double blockBottomZ) const {
+    if (usesDiameter() && !ownDepth) {
+        // Kegel: Tiefe bis zum gewünschten Durchmesser an der Oberfläche
+        const double halfAngle = std::clamp(tipAngleDeg, 10.0, 170.0) * 0.5 * 3.14159265358979323846 / 180.0;
+        return blockStartZ - std::max(0.0, diameter) * 0.5 / std::tan(halfAngle);
+    }
+    if (type == DrillOperationType::SpotFace || ownDepth) return depthZ;
+    return blockBottomZ;
+}
+
+int DrillOperation::cycleCode() const {
+    if (isTapping()) return 3;
+    if (type == DrillOperationType::Ream) return 4;
+    if (type == DrillOperationType::Bore) return boreSpindleStop ? 5 : 4;
+    if (usesDrillCycleType()) {
+        if (cycleType == DrillCycleType::DeepHole) return 1;
+        if (cycleType == DrillCycleType::ChipBreak) return 2;
+    }
+    return 0;
+}
+
+double DrillOperation::effectiveFeed() const {
+    if (isTapping()) return std::max(1.0, spindleRpm * std::max(0.01, threadPitch));
+    return plungeFeed;
+}
+
+QJsonObject DrillOperation::toJson() const {
+    QJsonObject o;
+    o[QStringLiteral("type")] = static_cast<int>(type);
+    o[QStringLiteral("toolId")] = toolId;
+    o[QStringLiteral("spindleRpm")] = spindleRpm;
+    o[QStringLiteral("plungeFeed")] = plungeFeed;
+    o[QStringLiteral("cycleType")] = static_cast<int>(cycleType);
+    o[QStringLiteral("peckDepth")] = peckDepth;
+    o[QStringLiteral("retractDistance")] = retractDistance;
+    o[QStringLiteral("dwellSec")] = dwellSec;
+    o[QStringLiteral("diameter")] = diameter;
+    o[QStringLiteral("tipAngleDeg")] = tipAngleDeg;
+    o[QStringLiteral("ownDepth")] = ownDepth;
+    o[QStringLiteral("depthZ")] = depthZ;
+    o[QStringLiteral("threadPitch")] = threadPitch;
+    o[QStringLiteral("boreSpindleStop")] = boreSpindleStop;
+    return o;
+}
+
+DrillOperation DrillOperation::fromJson(const QJsonObject& json) {
+    DrillOperation op = createDefault(static_cast<DrillOperationType>(
+        std::clamp(json[QStringLiteral("type")].toInt(), 0, static_cast<int>(DrillOperationType::Ream))), 1);
+    auto readD = [&json](const char* key, double& v) {
+        if (json.contains(QLatin1String(key))) v = json[QLatin1String(key)].toDouble();
+    };
+    if (json.contains(QStringLiteral("toolId"))) op.toolId = json[QStringLiteral("toolId")].toInt();
+    readD("spindleRpm", op.spindleRpm);
+    readD("plungeFeed", op.plungeFeed);
+    if (json.contains(QStringLiteral("cycleType"))) {
+        op.cycleType = static_cast<DrillCycleType>(std::clamp(json[QStringLiteral("cycleType")].toInt(), 0, 3));
+    }
+    readD("peckDepth", op.peckDepth);
+    readD("retractDistance", op.retractDistance);
+    readD("dwellSec", op.dwellSec);
+    readD("diameter", op.diameter);
+    readD("tipAngleDeg", op.tipAngleDeg);
+    if (json.contains(QStringLiteral("ownDepth"))) op.ownDepth = json[QStringLiteral("ownDepth")].toBool();
+    readD("depthZ", op.depthZ);
+    readD("threadPitch", op.threadPitch);
+    if (json.contains(QStringLiteral("boreSpindleStop"))) op.boreSpindleStop = json[QStringLiteral("boreSpindleStop")].toBool();
+    return op;
+}
+
+DrillOperation DrillOperation::createDefault(DrillOperationType type, int toolId) {
+    DrillOperation op;
+    op.type = type;
+    op.toolId = toolId;
+    switch (type) {
+        case DrillOperationType::Drill:
+            op.spindleRpm = 1500.0; op.plungeFeed = 150.0;
+            break;
+        case DrillOperationType::CenterDrill:
+            op.spindleRpm = 2000.0; op.plungeFeed = 100.0; op.diameter = 3.0; op.tipAngleDeg = 60.0;
+            break;
+        case DrillOperationType::SpotFace:
+            op.spindleRpm = 800.0; op.plungeFeed = 60.0; op.depthZ = -1.0; op.dwellSec = 0.5;
+            break;
+        case DrillOperationType::NcSpotDrill:
+            op.spindleRpm = 2000.0; op.plungeFeed = 150.0; op.diameter = 4.0; op.tipAngleDeg = 90.0;
+            break;
+        case DrillOperationType::Countersink:
+            op.spindleRpm = 800.0; op.plungeFeed = 80.0; op.diameter = 8.0; op.tipAngleDeg = 90.0;
+            break;
+        case DrillOperationType::PeckDrill:
+            op.spindleRpm = 1500.0; op.plungeFeed = 150.0; op.cycleType = DrillCycleType::DeepHole; op.peckDepth = 2.0;
+            break;
+        case DrillOperationType::CustomDrill:
+            op.spindleRpm = 1500.0; op.plungeFeed = 150.0; op.cycleType = DrillCycleType::ChipBreak; op.peckDepth = 1.0;
+            break;
+        case DrillOperationType::Tap:
+            op.spindleRpm = 300.0; op.threadPitch = 1.0;
+            break;
+        case DrillOperationType::RigidTap:
+            op.spindleRpm = 500.0; op.threadPitch = 1.0;
+            break;
+        case DrillOperationType::Bore:
+            op.spindleRpm = 800.0; op.plungeFeed = 60.0;
+            break;
+        case DrillOperationType::Ream:
+            op.spindleRpm = 400.0; op.plungeFeed = 80.0;
+            break;
+    }
+    return op;
+}
+
+void ConversationalBlock::convertLegacyDrillCycle() {
+    if (type != BlockType::Drill || !drillOps.empty()) return;
+    DrillOperation op = DrillOperation::createDefault(DrillOperationType::Drill, toolId);
+    op.spindleRpm = spindleRpm;
+    op.plungeFeed = plungeFeedRate;
+    op.peckDepth = peckDepth;
+    op.retractDistance = 0.5;
+    switch (drillCycle) {
+        case 1: op.cycleType = DrillCycleType::DeepHole; break;
+        case 2: op.cycleType = DrillCycleType::ChipBreak; break;
+        case 3:
+            op.type = DrillOperationType::Tap;
+            op.threadPitch = spindleRpm > 1.0 ? plungeFeedRate / spindleRpm : 1.0;
+            break;
+        case 4: op.type = DrillOperationType::Ream; break;
+        case 5: op.type = DrillOperationType::Bore; op.boreSpindleStop = true; break;
+        default:
+            if (dwellTimeSec > 1e-6) op.cycleType = DrillCycleType::Dwell;
+            break;
+    }
+    op.dwellSec = std::max(0.0, dwellTimeSec);
+    drillOps.push_back(op);
 }
 
 ConversationalBlock::ConversationalBlock(int blockId, BlockType blockType, const QString& blockName)
@@ -221,17 +391,24 @@ std::vector<Core::Vector3D> ConversationalBlock::calculateDrillPositions() const
             positions.push_back({mx, my, 0.0});
         }
         if (positions.empty()) {
-            positions.push_back({0.0, 0.0, 0.0}); // Mindestens eine Position
+            positions.push_back({posX, posY, 0.0}); // Mindestens eine Position
         }
+        return positions; // Positionsliste: absolute Koordinaten
     }
 
+    // Muster liegen um den Bezugspunkt X/Y
+    for (auto& p : positions) {
+        p.x += posX;
+        p.y += posY;
+    }
     return positions;
 }
 
 Toolpath ConversationalBlock::generateToolpath(const Core::ToolDefinition& tool, 
                                                const Core::ToolDefinition& finishTool,
                                                const Core::BoundingBox& stockBounds, 
-                                               const Geometry::Mesh& partMesh) const {
+                                               const Geometry::Mesh& partMesh,
+                                               const QList<Core::ToolDefinition>& toolLibrary) const {
     Toolpath tp(name);
     if (!enabled) return tp;
 
@@ -391,13 +568,27 @@ Toolpath ConversationalBlock::generateToolpath(const Core::ToolDefinition& tool,
                 c = fromSegments;
                 bool varies = false;
                 for (double z : segZ) varies = varies || std::abs(z - targetZ) > 1e-6;
-                if (varies && segZ.size() == c.points.size()) profileZ = segZ;
+                // Tiefe je Segment nur bei Konturen, deren Z nicht für alle Segmente gilt
+                const bool perSegmentZ = contourRole == ContourRole::Profile && !contourZForAll;
+                if (perSegmentZ && varies && segZ.size() == c.points.size()) profileZ = segZ;
             }
         }
         if (c.empty()) {
             c = Geometry::Contour::createRectangle(-30.0, -20.0, 60.0, 40.0);
         }
-        tp = millContour(c, contourSide, profileZ);
+        if (contourRole == ContourRole::Island) {
+            // Insel: wird von der vorangehenden Tasche ausgespart, eigener Block fräst nichts
+        } else if (contourRole == ContourRole::Pocket) {
+            c.isClosed = true;
+            std::vector<Geometry::Contour> islandContours;
+            for (const auto& islandSegs : pocketIslands) {
+                auto island = Geometry::Contour::createFromSegments(islandSegs, true);
+                if (island.points.size() >= 3) islandContours.push_back(island);
+            }
+            tp = millPocket(c, islandContours);
+        } else {
+            tp = millContour(c, contourSide, profileZ);
+        }
         tp.operationName = name;
     } else if (type == BlockType::Slot) {
         // Langloch / Nut: Position, Eckenradius und parallele Wiederholungen
@@ -482,68 +673,108 @@ Toolpath ConversationalBlock::generateToolpath(const Core::ToolDefinition& tool,
         }
         tp.operationName = name;
     } else if (type == BlockType::Drill) {
-        // Bohrzyklen: 0 G81 Einfach, 1 G83 Spanbruch (zur R-Ebene), 2 G73 Tiefloch (kurzer Rückzug),
-        //             3 G84 Gewinde, 4 G85 Ausbohren, 5 G86 Ausspindeln
-        const auto holes = calculateDrillPositions();
-        const double peck = std::max(0.2, peckDepth);
-        const double rPlane = startZ + 1.0; // R-Ebene über dem Werkstück
-        const double drillFeed = cutTool.plungeFeedRate;
-        Core::Vector3D currentPos(0.0, 0.0, clearanceZ);
-        auto moveTo = [&](MotionType motion, double x, double y, double z, double feedValue) {
-            const Core::Vector3D target(x, y, z);
-            tp.addSegment(makeSeg(motion, currentPos, target, feedValue));
-            currentPos = target;
+        // Hurco Bohrungen: alle Bohrvorgänge nacheinander an allen Bohrpositionen.
+        // Ohne Bohrvorgänge (ältere Programme): Einzelzyklus mit eigenem Bohrbild
+        ConversationalBlock legacy;
+        const std::vector<DrillOperation>* ops = &drillOps;
+        std::vector<Core::Vector3D> holes;
+        if (drillOps.empty()) {
+            legacy = *this;
+            legacy.convertLegacyDrillCycle();
+            ops = &legacy.drillOps;
+            holes = calculateDrillPositions();
+        } else {
+            for (const auto& [hx, hy] : resolvedDrillPositions) holes.push_back({hx, hy, 0.0});
+        }
+
+        auto toolFor = [&](int id) {
+            for (const auto& t : toolLibrary) {
+                if (t.id == id) return t;
+            }
+            Core::ToolDefinition fallback = tool;
+            if (id > 0) fallback.id = id;
+            return fallback;
         };
 
-        int holeIndex = 0;
-        for (const auto& hole : holes) {
-            const size_t holeFirstSeg = tp.segments.size();
-            moveTo(MotionType::Rapid, hole.x, hole.y, clearanceZ, 0.0);
-            moveTo(MotionType::Rapid, hole.x, hole.y, rPlane, 0.0);
+        const double rPlane = startZ + 1.0; // R-Ebene über dem Werkstück
+        Core::Vector3D currentPos(0.0, 0.0, clearanceZ);
+        int opIndex = 0;
+        for (const auto& op : *ops) {
+            const Core::ToolDefinition opTool = toolFor(op.toolId);
+            const double bottom = std::min(op.bottomZ(startZ, targetZ), rPlane);
+            const double feed = op.effectiveFeed();
+            const int cycle = op.cycleCode();
+            const double peck = std::max(0.2, op.peckDepth > 1e-6 ? op.peckDepth : peckDepth);
+            const bool withDwell = !op.usesDrillCycleType() || op.cycleType == DrillCycleType::Dwell;
+            const double dwell = withDwell ? std::max(0.0, op.dwellSec) : 0.0;
 
-            switch (drillCycle) {
-                case 1:   // G83: nach jeder Zustellung zur R-Ebene
-                case 2: { // G73: nur kurz zurückziehen (Spanbruch)
-                    double curZ = std::min(startZ, rPlane);
-                    while (curZ > targetZ + 1e-4) {
-                        const double nextZ = std::max(targetZ, curZ - peck);
-                        moveTo(MotionType::LinearFeed, hole.x, hole.y, nextZ, drillFeed);
-                        curZ = nextZ;
-                        if (curZ <= targetZ + 1e-4) break;
-                        if (drillCycle == 1) {
-                            moveTo(MotionType::Rapid, hole.x, hole.y, rPlane, 0.0);
-                            moveTo(MotionType::LinearFeed, hole.x, hole.y, curZ + 0.3, cutTool.defaultFeedRate);
-                        } else {
-                            moveTo(MotionType::LinearFeed, hole.x, hole.y, curZ + 0.5, cutTool.defaultFeedRate);
+            auto moveTo = [&](MotionType motion, double x, double y, double z, double feedValue) {
+                PathSegment seg;
+                seg.motion = motion;
+                seg.startPos = currentPos;
+                seg.endPos = Core::Vector3D(x, y, z);
+                seg.feedRate = (motion == MotionType::Rapid) ? 0.0 : feedValue;
+                seg.spindleRpm = op.spindleRpm;
+                seg.toolId = opTool.id;
+                seg.toolDiameter = opTool.diameter;
+                tp.addSegment(seg);
+                currentPos = seg.endPos;
+            };
+
+            int holeIndex = 0;
+            for (const auto& hole : holes) {
+                const size_t holeFirstSeg = tp.segments.size();
+                moveTo(MotionType::Rapid, hole.x, hole.y, clearanceZ, 0.0);
+                moveTo(MotionType::Rapid, hole.x, hole.y, rPlane, 0.0);
+
+                switch (cycle) {
+                    case 1:   // G83 Tiefloch: nach jeder Stufe zur R-Ebene
+                    case 2: { // G73 Spanbruch: kurzer Rückzug
+                        double curZ = std::min(startZ, rPlane);
+                        while (curZ > bottom + 1e-4) {
+                            const double nextZ = std::max(bottom, curZ - peck);
+                            moveTo(MotionType::LinearFeed, hole.x, hole.y, nextZ, feed);
+                            curZ = nextZ;
+                            if (curZ <= bottom + 1e-4) break;
+                            if (cycle == 1) {
+                                moveTo(MotionType::Rapid, hole.x, hole.y, rPlane, 0.0);
+                                moveTo(MotionType::LinearFeed, hole.x, hole.y, curZ + 0.3, feed);
+                            } else {
+                                moveTo(MotionType::LinearFeed, hole.x, hole.y,
+                                       curZ + std::max(0.05, op.retractDistance), feed);
+                            }
                         }
+                        moveTo(MotionType::Rapid, hole.x, hole.y, rPlane, 0.0);
+                        break;
                     }
-                    moveTo(MotionType::Rapid, hole.x, hole.y, rPlane, 0.0);
-                    break;
+                    case 3:   // G84 Gewinde: hinein und im Vorschub heraus (Spindelumkehr an der Steuerung)
+                    case 4:   // G85 Reiben / Ausdrehen: hinein und im Vorschub heraus
+                        moveTo(MotionType::LinearFeed, hole.x, hole.y, bottom, feed);
+                        moveTo(MotionType::LinearFeed, hole.x, hole.y, rPlane, feed);
+                        break;
+                    default:  // G81/G82 Bohren, Zentrieren, Senken / G86 Ausdrehen: hinein, im Eilgang heraus
+                        moveTo(MotionType::LinearFeed, hole.x, hole.y, bottom, feed);
+                        moveTo(MotionType::Rapid, hole.x, hole.y, rPlane, 0.0);
+                        break;
                 }
-                case 3:   // G84 Gewinde: hinein und im Vorschub heraus (Spindelumkehr an der Steuerung)
-                case 4:   // G85 Ausbohren: hinein und im Vorschub heraus
-                    moveTo(MotionType::LinearFeed, hole.x, hole.y, targetZ, drillFeed);
-                    moveTo(MotionType::LinearFeed, hole.x, hole.y, rPlane, drillFeed);
-                    break;
-                default:  // G81 Einfach / G86 Ausspindeln: hinein, im Eilgang heraus
-                    moveTo(MotionType::LinearFeed, hole.x, hole.y, targetZ, drillFeed);
-                    moveTo(MotionType::Rapid, hole.x, hole.y, rPlane, 0.0);
-                    break;
-            }
-            moveTo(MotionType::Rapid, hole.x, hole.y, clearanceZ, 0.0);
+                moveTo(MotionType::Rapid, hole.x, hole.y, clearanceZ, 0.0);
 
-            // Bohrung für die Zyklus-Ausgabe im Postprozessor kennzeichnen
-            for (size_t k = holeFirstSeg; k < tp.segments.size(); ++k) {
-                auto& s = tp.segments[k];
-                s.drillCycle = std::clamp(drillCycle, 0, 5);
-                s.drillHole = holeIndex;
-                s.drillDepthZ = targetZ;
-                s.drillRPlaneZ = rPlane;
-                s.drillPeck = peck;
-                s.drillDwellSec = std::max(0.0, dwellTimeSec);
+                // Bohrung für die Zyklus-Ausgabe im Postprozessor kennzeichnen
+                for (size_t k = holeFirstSeg; k < tp.segments.size(); ++k) {
+                    auto& s = tp.segments[k];
+                    s.drillCycle = cycle;
+                    s.drillOperation = opIndex;
+                    s.drillHole = holeIndex;
+                    s.drillDepthZ = bottom;
+                    s.drillRPlaneZ = rPlane;
+                    s.drillPeck = peck;
+                    s.drillDwellSec = dwell;
+                }
+                ++holeIndex;
             }
-            ++holeIndex;
+            ++opIndex;
         }
+        tp.operationName = name;
     } else if (type == BlockType::Stl3D) {
         // Welches Mesh verwenden: direktes Mesh, STL-Dateipfad oder aktives partMesh
         Geometry::Mesh activeMesh = directStlMesh;
@@ -649,7 +880,8 @@ Toolpath ConversationalBlock::generateToolpath(const Core::ToolDefinition& tool,
             seg.toolDiameter = (seg.toolId == finishTool.id) ? finishTool.diameter : tool.diameter;
         }
         // Kontur, Tasche und Langloch bringen eigene Drehzahlen mit (Schlichtwerkzeug), sonst Block-Drehzahl
-        const bool ownRpm = (type == BlockType::Contour || type == BlockType::Pocket || type == BlockType::Slot);
+        const bool ownRpm = (type == BlockType::Contour || type == BlockType::Pocket || type == BlockType::Slot
+                             || type == BlockType::Drill);
         if (!ownRpm || seg.spindleRpm <= 0.0) seg.spindleRpm = spindleRpm;
         seg.coolantOn = coolantOn;
         seg.visible = visible;
@@ -699,6 +931,8 @@ QJsonObject ConversationalBlock::toJson() const {
 
     // Kontur
     obj[QStringLiteral("contourSide")] = static_cast<int>(contourSide);
+    obj[QStringLiteral("contourRole")] = static_cast<int>(contourRole);
+    obj[QStringLiteral("contourZForAll")] = contourZForAll;
     obj[QStringLiteral("finishAllowance")] = finishAllowance;
     obj[QStringLiteral("leadRadius")] = leadRadius;
     obj[QStringLiteral("leadType")] = leadType;
@@ -734,6 +968,11 @@ QJsonObject ConversationalBlock::toJson() const {
 
     // Bohrzyklus
     obj[QStringLiteral("drillCycle")] = drillCycle;
+    {
+        QJsonArray opArray;
+        for (const auto& op : drillOps) opArray.append(op.toJson());
+        obj[QStringLiteral("drillOps")] = opArray;
+    }
     obj[QStringLiteral("dwellTimeSec")] = dwellTimeSec;
 
     obj[QStringLiteral("pocketShape")] = static_cast<int>(pocketShape);
@@ -909,6 +1148,14 @@ ConversationalBlock ConversationalBlock::fromJson(const QJsonObject& json) {
 
     // Bohrzyklus
     readInt(QStringLiteral("drillCycle"), b.drillCycle);
+    b.drillOps.clear();
+    for (const auto& v : json[QStringLiteral("drillOps")].toArray()) {
+        b.drillOps.push_back(DrillOperation::fromJson(v.toObject()));
+    }
+    if (json.contains(QStringLiteral("contourRole"))) {
+        b.contourRole = static_cast<ContourRole>(std::clamp(json[QStringLiteral("contourRole")].toInt(), 0, 2));
+    }
+    readBool(QStringLiteral("contourZForAll"), b.contourZForAll);
     readDouble(QStringLiteral("dwellTimeSec"), b.dwellTimeSec);
 
     if (json.contains(QStringLiteral("pocketShape"))) b.pocketShape = static_cast<PocketShape>(json[QStringLiteral("pocketShape")].toInt());

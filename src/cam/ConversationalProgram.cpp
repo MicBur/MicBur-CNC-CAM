@@ -41,10 +41,75 @@ bool ConversationalProgram::moveBlockDown(size_t index) {
     return false;
 }
 
+int ConversationalProgram::nextBlockId() const {
+    int maxId = 0;
+    for (const auto& b : blocks) maxId = std::max(maxId, b.id);
+    return maxId + 1;
+}
+
+ConversationalBlock ConversationalProgram::resolvedBlock(size_t index) const {
+    ConversationalBlock block = blocks.at(index);
+
+    // Bohrungen (Hurco): Bohrpositionen stehen in den direkt folgenden Bohrpositionen-Blöcken
+    if (block.type == BlockType::Drill && !block.drillOps.empty()) {
+        block.resolvedDrillPositions.clear();
+        for (size_t k = index + 1; k < blocks.size() && blocks[k].type == BlockType::DrillPositions; ++k) {
+            if (!blocks[k].enabled) continue;
+            for (const auto& p : blocks[k].calculateDrillPositions()) {
+                block.resolvedDrillPositions.push_back({p.x, p.y});
+            }
+        }
+    }
+
+    // Tasche aus Kontur: die direkt folgenden Insel-Konturen werden ausgespart
+    if (block.type == BlockType::Contour && block.contourRole == ContourRole::Pocket) {
+        for (size_t k = index + 1; k < blocks.size(); ++k) {
+            const auto& next = blocks[k];
+            if (next.type != BlockType::Contour || next.contourRole != ContourRole::Island) break;
+            if (!next.enabled) continue;
+            if (!next.segments.empty()) {
+                block.pocketIslands.push_back(next.segments);
+            } else if (next.contour.points.size() >= 3) {
+                std::vector<Geometry::ContourSegment> segs;
+                for (size_t n = 0; n < next.contour.points.size(); ++n) {
+                    Geometry::ContourSegment seg;
+                    seg.type = (n == 0) ? Geometry::ContourSegmentType::StartPoint : Geometry::ContourSegmentType::Line;
+                    seg.x = next.contour.points[n].x;
+                    seg.y = next.contour.points[n].y;
+                    segs.push_back(seg);
+                }
+                block.pocketIslands.push_back(segs);
+            }
+        }
+    }
+    return block;
+}
+
+bool ConversationalProgram::upgradeDrillBlock(size_t index) {
+    if (index >= blocks.size() || blocks[index].type != BlockType::Drill || !blocks[index].drillOps.empty()) {
+        return false;
+    }
+    // Bohrbild des alten Blocks wird zu einem eigenen Bohrpositionen-Block
+    ConversationalBlock positions = blocks[index];
+    positions.type = BlockType::DrillPositions;
+    positions.id = nextBlockId();
+    positions.name = QStringLiteral("%1: Bohrpositionen").arg(positions.id);
+
+    blocks[index].convertLegacyDrillCycle();
+    blocks.insert(blocks.begin() + static_cast<std::ptrdiff_t>(index) + 1, positions);
+    return true;
+}
+
+void ConversationalProgram::upgradeLegacyDrillBlocks() {
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (upgradeDrillBlock(i)) ++i;
+    }
+}
+
 void ConversationalProgram::duplicateBlock(size_t index) {
     if (index < blocks.size()) {
         ConversationalBlock copy = blocks[index];
-        copy.id = static_cast<int>(blocks.size()) + 1;
+        copy.id = nextBlockId();
         copy.name = QString("%1 (Kopie)").arg(copy.name);
         blocks.insert(blocks.begin() + index + 1, copy);
     }
@@ -227,6 +292,8 @@ Toolpath ConversationalProgram::generateFullToolpath(
     };
 
     auto appendBlock = [&](const ConversationalBlock& block, const PatternTransform& transform) {
+        // Bohrpositionen und Inseln gehören zum vorangehenden Block und fräsen selbst nichts
+        if (block.type == BlockType::DrillPositions) return;
         // Werkzeug für diesen Block (Hauptwerkzeug) suchen
         Core::ToolDefinition mainTool(block.toolId, "Standardfräser", Core::ToolType::EndMill, 6.0);
         for (const auto& t : toolLibrary) {
@@ -246,7 +313,7 @@ Toolpath ConversationalProgram::generateFullToolpath(
             }
         }
 
-        Toolpath blockTp = block.generateToolpath(mainTool, finishTool, stockBounds, partMesh);
+        Toolpath blockTp = block.generateToolpath(mainTool, finishTool, stockBounds, partMesh, toolLibrary);
         const bool transformed = !transform.isIdentity();
         const double clearance = std::max(block.clearanceZ, block.startZ + block.clearanceZ);
 
@@ -294,7 +361,7 @@ Toolpath ConversationalProgram::generateFullToolpath(
                     continue;
                 }
 
-                if (block.enabled) appendBlock(block, outer);
+                if (block.enabled) appendBlock(resolvedBlock(i), outer);
             }
         };
     generateRange(0, blocks.size(), PatternTransform{});
@@ -361,7 +428,13 @@ ConversationalProgram ConversationalProgram::loadFromFile(const QString& filePat
     if (root.contains(QStringLiteral("blocks"))) {
         QJsonArray blkArray = root[QStringLiteral("blocks")].toArray();
         for (const auto& v : blkArray) {
-            prog.addBlock(ConversationalBlock::fromJson(v.toObject()));
+            const QJsonObject obj = v.toObject();
+            ConversationalBlock block = ConversationalBlock::fromJson(obj);
+            prog.addBlock(block);
+            // Ältere Datei: Zyklus und Bohrbild in einem Block → Bohrungen + Bohrpositionen
+            if (block.type == BlockType::Drill && !obj.contains(QStringLiteral("drillOps"))) {
+                prog.upgradeDrillBlock(prog.blocks.size() - 1);
+            }
         }
     }
 

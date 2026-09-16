@@ -15,6 +15,9 @@
 #include <QKeySequence>
 #include <QElapsedTimer>
 #include <QJsonDocument>
+#include <QMenu>
+#include <QToolButton>
+#include <algorithm>
 
 namespace GeminiCNC::UI {
 
@@ -90,10 +93,14 @@ struct ConversationalEditorDialog::UndoGroup {
 
 ConversationalEditorDialog::ConversationalEditorDialog(QWidget* parent) : QWidget(parent) {
     m_program = CAM::ConversationalProgram::createSampleProgram();
+    m_program.upgradeLegacyDrillBlocks(); // Hurco: Bohrungen + Bohrpositionen
     m_toolLibrary = Core::ToolDefinition::createDefaultLibrary();
     m_undoStack = new QUndoStack(this);
     m_undoStack->setUndoLimit(100);
     setupUi();
+    for (const auto& t : m_toolLibrary) {
+        m_cmbDrillOpTool->addItem(QString("T%1: %2 (Ø %3mm)").arg(t.id).arg(t.name).arg(t.diameter, 0, 'f', 1), t.id);
+    }
     refreshBlockList();
     loadBlockToUi(0);
     resetUndoHistory(); // Aufbau der Oberfläche ist kein Rückgängig-Schritt
@@ -113,6 +120,12 @@ void ConversationalEditorDialog::setToolLibrary(const QList<Core::ToolDefinition
         QString text = QString("T%1: %2 (Ø %3mm)").arg(t.id).arg(t.name).arg(t.diameter, 0, 'f', 1);
         m_cmbTool->addItem(text, t.id);
         if (m_cmbFinishTool) m_cmbFinishTool->addItem(text, t.id);
+    }
+    if (m_cmbDrillOpTool) {
+        m_cmbDrillOpTool->clear();
+        for (const auto& t : m_toolLibrary) {
+            m_cmbDrillOpTool->addItem(QString("T%1: %2 (Ø %3mm)").arg(t.id).arg(t.name).arg(t.diameter, 0, 'f', 1), t.id);
+        }
     }
     if (m_segmentEditor) m_segmentEditor->setToolLibrary(m_toolLibrary);
     m_isUpdatingUi = false;
@@ -304,10 +317,14 @@ void ConversationalEditorDialog::setupUi() {
     connect(m_spinStartZ, &QDoubleSpinBox::valueChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
     connect(m_spinTargetZ, &QDoubleSpinBox::valueChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
 
-    geomCommonLayout->addWidget(new QLabel(QStringLiteral("X:"))); geomCommonLayout->addWidget(m_spinPosX);
-    geomCommonLayout->addWidget(new QLabel(QStringLiteral("Y:"))); geomCommonLayout->addWidget(m_spinPosY);
-    geomCommonLayout->addWidget(new QLabel(QStringLiteral("Z-Start:"))); geomCommonLayout->addWidget(m_spinStartZ);
-    geomCommonLayout->addWidget(new QLabel(QStringLiteral("Z-Tiefe:"))); geomCommonLayout->addWidget(m_spinTargetZ);
+    m_lblPosX = new QLabel(QStringLiteral("X:"), this);
+    m_lblPosY = new QLabel(QStringLiteral("Y:"), this);
+    m_lblStartZ = new QLabel(QStringLiteral("Z-Start:"), this);
+    m_lblTargetZ = new QLabel(QStringLiteral("Z-Tiefe:"), this);
+    geomCommonLayout->addWidget(m_lblPosX); geomCommonLayout->addWidget(m_spinPosX);
+    geomCommonLayout->addWidget(m_lblPosY); geomCommonLayout->addWidget(m_spinPosY);
+    geomCommonLayout->addWidget(m_lblStartZ); geomCommonLayout->addWidget(m_spinStartZ);
+    geomCommonLayout->addWidget(m_lblTargetZ); geomCommonLayout->addWidget(m_spinTargetZ);
     detailLayout->addLayout(geomCommonLayout);
 
     // 4. Kontext-spezifischer Stack für Block-Typen (Geometrie)
@@ -356,6 +373,32 @@ void ConversationalEditorDialog::setupUi() {
     auto* pageContour = new QWidget(this);
     auto* lContour = new QFormLayout(pageContour);
     lContour->setSpacing(6);
+    m_contourForm = lContour;
+
+    m_cmbContourRole = new QComboBox(this);
+    m_cmbContourRole->addItems({QStringLiteral("Kontur (Fräsbahn)"), QStringLiteral("Tasche (ausräumen)"),
+                                QStringLiteral("Insel (in vorheriger Tasche)")});
+    connect(m_cmbContourRole, &QComboBox::currentIndexChanged, this, [this]() {
+        if (m_isUpdatingUi) return;
+        saveCurrentBlockFromUi();
+        loadBlockToUi(m_selectedBlockIndex); // nur die nötigen Felder zeigen
+    });
+    lContour->addRow(QStringLiteral("Konturart:"), m_cmbContourRole);
+
+    m_chkContourZForAll = new QCheckBox(QStringLiteral("Z UNTEN von Segment 0 gilt für alle Segmente"), this);
+    m_chkContourZForAll->setToolTip(QStringLiteral("Aus: Z END kann je Segment eingegeben werden (z. B. schräge Konturen)."));
+    connect(m_chkContourZForAll, &QCheckBox::toggled, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
+    lContour->addRow(QStringLiteral("Tiefe:"), m_chkContourZForAll);
+
+    m_cmbContourPocketStrategy = new QComboBox(this);
+    m_cmbContourPocketStrategy->addItems({QStringLiteral("Zickzack"), QStringLiteral("Spiral (innen→außen)"), QStringLiteral("Konturparallel")});
+    connect(m_cmbContourPocketStrategy, &QComboBox::currentIndexChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
+    lContour->addRow(QStringLiteral("Räumstrategie:"), m_cmbContourPocketStrategy);
+
+    m_lblContourRoleInfo = new QLabel(this);
+    m_lblContourRoleInfo->setWordWrap(true);
+    m_lblContourRoleInfo->setStyleSheet("color: #90CDF4;");
+    lContour->addRow(m_lblContourRoleInfo);
 
     m_cmbContourSide = new QComboBox(this);
     m_cmbContourSide->addItems({QStringLiteral("Außen"), QStringLiteral("Innen"), QStringLiteral("Auf Kontur")});
@@ -374,6 +417,7 @@ void ConversationalEditorDialog::setupUi() {
     leadRow->addWidget(new QLabel("Typ:")); leadRow->addWidget(m_cmbLeadType);
     leadRow->addWidget(new QLabel("R:")); leadRow->addWidget(m_spinLeadRadius);
     lContour->addRow(QStringLiteral("An-/Abfahrt:"), leadRow);
+    m_contourLeadRow = leadRow;
 
     // Haltestege
     auto* tabRow = new QHBoxLayout();
@@ -388,6 +432,7 @@ void ConversationalEditorDialog::setupUi() {
     tabRow->addWidget(new QLabel("B:")); tabRow->addWidget(m_spinTabWidth);
     tabRow->addWidget(new QLabel("H:")); tabRow->addWidget(m_spinTabHeight);
     lContour->addRow(QStringLiteral("Haltestege:"), tabRow);
+    m_contourTabRow = tabRow;
 
     auto* pickLayout = new QHBoxLayout();
     m_btnPickContour = new QPushButton(QStringLiteral("⌖ Kontur anklicken"), this);
@@ -477,33 +522,194 @@ void ConversationalEditorDialog::setupUi() {
     m_stackParams->addWidget(pagePocket); // Index 2
 
     // ════════════════════════════════════════════
-    // Seite 3: Bohrbild
+    // Seite 3: Bohrungen (Hurco WinMax: Bohrvorgänge mit PROCESS-Daten)
     // ════════════════════════════════════════════
     auto* pageDrill = new QWidget(this);
-    auto* lDrill = new QFormLayout(pageDrill);
+    auto* lDrill = new QVBoxLayout(pageDrill);
+    lDrill->setContentsMargins(0, 0, 0, 0);
     lDrill->setSpacing(6);
 
-    m_cmbDrillCycle = new QComboBox(this);
-    m_cmbDrillCycle->addItems({
-        QStringLiteral("Einfach (G81)"), QStringLiteral("Spanbruch (G83)"),
-        QStringLiteral("Tiefloch (G73)"), QStringLiteral("Gewinde (G84)"),
-        QStringLiteral("Ausbohren (G85)"), QStringLiteral("Ausspindeln (G86)")
+    auto* opsRow = new QHBoxLayout();
+    m_listDrillOps = new QListWidget(this);
+    m_listDrillOps->setFixedHeight(120);
+    m_listDrillOps->setStyleSheet("background-color: #1A202C; color: #EDF2F7; font-size: 12px; border-radius: 4px;");
+    connect(m_listDrillOps, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (m_isUpdatingUi || row < 0) return;
+        m_selectedDrillOp = row;
+        loadDrillOpToUi();
     });
-    connect(m_cmbDrillCycle, &QComboBox::currentIndexChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
-    lDrill->addRow(QStringLiteral("Bohrzyklus:"), m_cmbDrillCycle);
+    opsRow->addWidget(m_listDrillOps, 1);
+
+    auto* opsButtons = new QVBoxLayout();
+    opsButtons->setSpacing(4);
+    auto makeOpMenuButton = [this, opsButtons](const QString& text, const std::vector<CAM::DrillOperationType>& types) {
+        auto* btn = new QToolButton(this);
+        btn->setText(text);
+        btn->setPopupMode(QToolButton::InstantPopup);
+        btn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        btn->setStyleSheet(QStringLiteral(
+            "QToolButton { background-color: #6B46C1; color: white; font-weight: bold; padding: 4px 8px; border-radius: 3px; }"));
+        auto* menu = new QMenu(btn);
+        for (const auto type : types) {
+            menu->addAction(CAM::drillOperationName(type), this, [this, type]() { addDrillOperation(type); });
+        }
+        btn->setMenu(menu);
+        opsButtons->addWidget(btn);
+    };
+    using DOT = CAM::DrillOperationType;
+    makeOpMenuButton(QStringLiteral("+ Bohren (Zyklen)"),
+                     {DOT::Drill, DOT::CenterDrill, DOT::SpotFace, DOT::NcSpotDrill, DOT::Countersink, DOT::PeckDrill, DOT::CustomDrill});
+    makeOpMenuButton(QStringLiteral("+ Gewindebohren"), {DOT::Tap, DOT::RigidTap});
+    makeOpMenuButton(QStringLiteral("+ Ausdrehen und Reiben"), {DOT::Bore, DOT::Ream});
+
+    auto* opsMoveRow = new QHBoxLayout();
+    auto* btnOpUp = new QPushButton(QStringLiteral("▲"), this);
+    auto* btnOpDown = new QPushButton(QStringLiteral("▼"), this);
+    auto* btnOpDel = new QPushButton(QStringLiteral("Löschen"), this);
+    btnOpDel->setStyleSheet("background-color: #E53E3E; color: white; border-radius: 3px;");
+    auto moveOp = [this](int delta) {
+        if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+        auto& ops = m_program[m_selectedBlockIndex].drillOps;
+        const int from = m_selectedDrillOp;
+        const int to = from + delta;
+        if (from < 0 || to < 0 || from >= static_cast<int>(ops.size()) || to >= static_cast<int>(ops.size())) return;
+        const UndoGroup undoGroup(this, QStringLiteral("Bohrvorgang verschieben"));
+        std::swap(ops[static_cast<size_t>(from)], ops[static_cast<size_t>(to)]);
+        m_selectedDrillOp = to;
+        refreshDrillOpList();
+        saveCurrentBlockFromUi();
+    };
+    connect(btnOpUp, &QPushButton::clicked, this, [moveOp]() { moveOp(-1); });
+    connect(btnOpDown, &QPushButton::clicked, this, [moveOp]() { moveOp(1); });
+    connect(btnOpDel, &QPushButton::clicked, this, [this]() {
+        if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+        auto& ops = m_program[m_selectedBlockIndex].drillOps;
+        if (m_selectedDrillOp < 0 || m_selectedDrillOp >= static_cast<int>(ops.size())) return;
+        if (ops.size() <= 1) {
+            emit promptChanged(QStringLiteral("Ein Bohrungen-Block braucht mindestens einen Bohrvorgang."));
+            return;
+        }
+        const UndoGroup undoGroup(this, QStringLiteral("Bohrvorgang löschen"));
+        ops.erase(ops.begin() + m_selectedDrillOp);
+        m_selectedDrillOp = std::min(m_selectedDrillOp, static_cast<int>(ops.size()) - 1);
+        refreshDrillOpList();
+        saveCurrentBlockFromUi();
+    });
+    opsMoveRow->addWidget(btnOpUp);
+    opsMoveRow->addWidget(btnOpDown);
+    opsMoveRow->addWidget(btnOpDel);
+    opsButtons->addLayout(opsMoveRow);
+    opsButtons->addStretch(1);
+    opsRow->addLayout(opsButtons);
+    lDrill->addLayout(opsRow);
+
+    // PROCESS: Daten des ausgewählten Bohrvorgangs
+    m_grpDrillProcess = new QGroupBox(QStringLiteral("PROCESS"), this);
+    m_drillProcessForm = new QFormLayout(m_grpDrillProcess);
+    m_drillProcessForm->setSpacing(5);
+
+    m_cmbDrillOpTool = new QComboBox(this);
+    connect(m_cmbDrillOpTool, &QComboBox::currentIndexChanged, this, [this]() {
+        if (m_isUpdatingUi) return;
+        if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+        auto& ops = m_program[m_selectedBlockIndex].drillOps;
+        if (m_selectedDrillOp < 0 || m_selectedDrillOp >= static_cast<int>(ops.size())) return;
+        const UndoGroup undoGroup(this, QStringLiteral("Bohrwerkzeug ändern"));
+        auto& op = ops[static_cast<size_t>(m_selectedDrillOp)];
+        op.toolId = m_cmbDrillOpTool->currentData().toInt();
+        calculateDrillOpTechnology(op); // Schnittwerte zum neuen Werkzeug
+        refreshDrillOpList();
+        saveCurrentBlockFromUi();
+    });
+    m_drillProcessForm->addRow(QStringLiteral("WERKZEUG:"), m_cmbDrillOpTool);
+
+    m_cmbDrillCycleType = new QComboBox(this);
+    m_cmbDrillCycleType->addItems({QStringLiteral("STANDARD (G81)"), QStringLiteral("VERWEILZEIT (G82)"),
+                                   QStringLiteral("SPANBRUCH (G73)"), QStringLiteral("TIEFLOCH (G83)")});
+    connect(m_cmbDrillCycleType, &QComboBox::currentIndexChanged, this, [this]() {
+        saveDrillOpFromUi();
+        loadDrillOpToUi(); // Felder je Bohr-Typ ein-/ausblenden
+    });
+    m_drillProcessForm->addRow(QStringLiteral("BOHR-TYP:"), m_cmbDrillCycleType);
+
+    auto makeOpSpin = [this](double min, double max, double val, const QString& suffix, int decimals) {
+        auto* sp = new QDoubleSpinBox(this);
+        sp->setRange(min, max);
+        sp->setDecimals(decimals);
+        sp->setValue(val);
+        sp->setSuffix(suffix);
+        connect(sp, &QDoubleSpinBox::valueChanged, this, [this]() { saveDrillOpFromUi(); });
+        return sp;
+    };
+    m_spinDrillPeck = makeOpSpin(0.0, 100.0, 0.0, QStringLiteral(" mm"), 3);
+    m_drillProcessForm->addRow(QStringLiteral("STUFENTIEFE:"), m_spinDrillPeck);
+    m_spinDrillRetract = makeOpSpin(0.0, 20.0, 0.5, QStringLiteral(" mm"), 3);
+    m_drillProcessForm->addRow(QStringLiteral("RÜCKZUGSABSTAND:"), m_spinDrillRetract);
+    m_spinDrillDwell = makeOpSpin(0.0, 60.0, 0.0, QStringLiteral(" s"), 2);
+    m_drillProcessForm->addRow(QStringLiteral("VERWEILZEIT:"), m_spinDrillDwell);
+    m_spinDrillDiameter = makeOpSpin(0.0, 200.0, 4.0, QStringLiteral(" mm"), 3);
+    m_drillProcessForm->addRow(QStringLiteral("DURCHMESSER:"), m_spinDrillDiameter);
+    m_spinDrillTipAngle = makeOpSpin(10.0, 170.0, 90.0, QStringLiteral("°"), 1);
+    m_drillProcessForm->addRow(QStringLiteral("SPITZENWINKEL:"), m_spinDrillTipAngle);
+    m_chkDrillOwnDepth = new QCheckBox(QStringLiteral("Eigene Tiefe statt Z UNTEN des Blocks"), this);
+    connect(m_chkDrillOwnDepth, &QCheckBox::toggled, this, [this]() {
+        saveDrillOpFromUi();
+        loadDrillOpToUi();
+    });
+    m_drillProcessForm->addRow(QString(), m_chkDrillOwnDepth);
+    m_spinDrillDepth = makeOpSpin(-500.0, 500.0, -1.0, QStringLiteral(" mm"), 3);
+    m_drillProcessForm->addRow(QStringLiteral("Z UNTEN (VORGANG):"), m_spinDrillDepth);
+    m_spinDrillPitch = makeOpSpin(0.05, 20.0, 1.0, QStringLiteral(" mm"), 3);
+    m_drillProcessForm->addRow(QStringLiteral("STEIGUNG:"), m_spinDrillPitch);
+    m_cmbDrillBoreType = new QComboBox(this);
+    m_cmbDrillBoreType->addItems({QStringLiteral("VORSCHUB ZURÜCK (G85)"), QStringLiteral("SPINDELHALT, EILGANG ZURÜCK (G86)")});
+    connect(m_cmbDrillBoreType, &QComboBox::currentIndexChanged, this, [this]() { saveDrillOpFromUi(); });
+    m_drillProcessForm->addRow(QStringLiteral("AUSDREH-ART:"), m_cmbDrillBoreType);
+    m_spinDrillRpm = makeOpSpin(10.0, 60000.0, 1000.0, QStringLiteral(" U/min"), 0);
+    m_drillProcessForm->addRow(QStringLiteral("DREHZAHL:"), m_spinDrillRpm);
+    m_spinDrillFeed = makeOpSpin(1.0, 20000.0, 100.0, QStringLiteral(" mm/min"), 1);
+    m_drillProcessForm->addRow(QStringLiteral("EINTAUCHVORSCHUB:"), m_spinDrillFeed);
+    m_lblDrillOpInfo = new QLabel(this);
+    m_lblDrillOpInfo->setWordWrap(true);
+    m_lblDrillOpInfo->setStyleSheet("color: #90CDF4;");
+    m_drillProcessForm->addRow(m_lblDrillOpInfo);
+    lDrill->addWidget(m_grpDrillProcess);
+
+    auto* drillPosRow = new QHBoxLayout();
+    m_lblDrillPositionsInfo = new QLabel(this);
+    m_lblDrillPositionsInfo->setWordWrap(true);
+    auto* btnAddPositions = new QPushButton(QStringLiteral("+ Bohrpositionen anfügen"), this);
+    btnAddPositions->setStyleSheet("background-color: #553C9A; color: white; font-weight: bold; padding: 4px 8px; border-radius: 3px;");
+    connect(btnAddPositions, &QPushButton::clicked, this, [this]() { onAddBlockClicked(CAM::BlockType::DrillPositions); });
+    drillPosRow->addWidget(m_lblDrillPositionsInfo, 1);
+    drillPosRow->addWidget(btnAddPositions);
+    lDrill->addLayout(drillPosRow);
+
+    m_stackParams->addWidget(pageDrill); // Index 3
+
+    // ════════════════════════════════════════════
+    // Seite 10: Bohrpositionen (für den vorangehenden Bohrungen-Block)
+    // ════════════════════════════════════════════
+    auto* pagePositions = new QWidget(this);
+    auto* lPositions = new QFormLayout(pagePositions);
+    lPositions->setSpacing(6);
 
     m_cmbDrillPattern = new QComboBox(this);
     m_cmbDrillPattern->addItems({
-        QStringLiteral("Einzelbohrung"),
-        QStringLiteral("Lochkreis"),
+        QStringLiteral("Einzelbohrung (X/Y)"),
+        QStringLiteral("Teilkreis"),
         QStringLiteral("Lochraster"),
         QStringLiteral("Lochreihe"),
         QStringLiteral("Bogenreihe"),
         QStringLiteral("Rahmen"),
-        QStringLiteral("Manuell")
+        QStringLiteral("Positionsliste")
     });
-    connect(m_cmbDrillPattern, &QComboBox::currentIndexChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
-    lDrill->addRow(QStringLiteral("Muster:"), m_cmbDrillPattern);
+    connect(m_cmbDrillPattern, &QComboBox::currentIndexChanged, this, [this]() {
+        if (m_isUpdatingUi) return;
+        saveCurrentBlockFromUi();
+        loadBlockToUi(m_selectedBlockIndex); // X/Y bzw. Mitte X/Y je nach Lage
+    });
+    lPositions->addRow(QStringLiteral("LAGE:"), m_cmbDrillPattern);
 
     // ── Muster-Parameter als StackedWidget (zeigt nur aktives Muster) ──
     m_stackDrillPattern = new QStackedWidget(this);
@@ -650,18 +856,17 @@ void ConversationalEditorDialog::setupUi() {
             m_stackDrillPattern, &QStackedWidget::setCurrentIndex);
     m_stackDrillPattern->setCurrentIndex(0);
 
-    lDrill->addRow(QStringLiteral("Parameter:"), m_stackDrillPattern);
+    lPositions->addRow(QStringLiteral("PARAMETER:"), m_stackDrillPattern);
 
-    // ── Zyklusdaten ──
-    auto* drillOptRow = new QHBoxLayout();
-    m_spinPeckDepth = makeSpinMM(0.1, 50, 2);
-    m_spinDwellTime = new QDoubleSpinBox(this); m_spinDwellTime->setRange(0, 10); m_spinDwellTime->setValue(0.5); m_spinDwellTime->setSuffix(" s"); m_spinDwellTime->setDecimals(2);
-    connect(m_spinDwellTime, &QDoubleSpinBox::valueChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
-    drillOptRow->addWidget(new QLabel("Q (Span):")); drillOptRow->addWidget(m_spinPeckDepth);
-    drillOptRow->addWidget(new QLabel("P (Verweil):")); drillOptRow->addWidget(m_spinDwellTime);
-    lDrill->addRow(QStringLiteral("Zyklusdaten:"), drillOptRow);
+    m_lblDrillPatternHint = new QLabel(this);
+    m_lblDrillPatternHint->setWordWrap(true);
+    m_lblDrillPatternHint->setStyleSheet("color: #90CDF4;");
+    lPositions->addRow(m_lblDrillPatternHint);
 
-    m_stackParams->addWidget(pageDrill); // Index 3
+    auto* btnMorePositions = new QPushButton(QStringLiteral("+ Weitere Bohrpositionen"), this);
+    btnMorePositions->setStyleSheet("background-color: #553C9A; color: white; font-weight: bold; padding: 4px 8px; border-radius: 3px;");
+    connect(btnMorePositions, &QPushButton::clicked, this, [this]() { onAddBlockClicked(CAM::BlockType::DrillPositions); });
+    lPositions->addRow(QString(), btnMorePositions);
 
     // ════════════════════════════════════════════
     // Seite 4: Raw NC
@@ -1019,6 +1224,7 @@ void ConversationalEditorDialog::setupUi() {
     lPatternEnd->addWidget(lblPatternEnd);
     lPatternEnd->addStretch(1);
     m_stackParams->addWidget(pagePatternEnd); // Index 9
+    m_stackParams->addWidget(pagePositions);  // Index 10: Bohrpositionen
 
     detailLayout->addWidget(m_stackParams);
 
@@ -1179,6 +1385,19 @@ void ConversationalEditorDialog::setupUi() {
     });
     m_masterStack->addWidget(m_segmentEditor);     // Index 1: Segment-Datensatz-Editor
 
+    // Segment-Editor → Konturart (Kontur/Tasche/Insel) und "Z für alle Segmente" in den Block
+    connect(m_segmentEditor, &ContourSegmentEditorDialog::contourOptionsChanged, this, [this](int role, bool zForAll) {
+        if (m_segmentEditorMode != SegmentEditorMode::BlockContour) return;
+        if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+        const UndoGroup undoGroup(this, QStringLiteral("Konturart ändern"));
+        auto& b = m_program[m_selectedBlockIndex];
+        b.contourRole = static_cast<CAM::ContourRole>(std::clamp(role, 0, 2));
+        b.contourZForAll = zForAll;
+        b.segments = m_segmentEditor->segments();
+        refreshBlockList();
+        loadBlockToUi(m_selectedBlockIndex);
+    });
+
     // Segment-Editor → Live-Kontur-Update → Toolpath senden
     connect(m_segmentEditor, &ContourSegmentEditorDialog::contourUpdated, this, [this](const Geometry::Contour& contour) {
         const UndoGroup undoGroup(this, QStringLiteral("Kontur ändern"), true);
@@ -1202,7 +1421,8 @@ void ConversationalEditorDialog::setupUi() {
                 if (t.id == b.finishToolId) finishTool = t;
             }
             if (b.finishToolId <= 0) finishTool = activeTool;
-            emit toolpathGenerated(b.generateToolpath(activeTool, finishTool, m_stockMesh.boundingBox, m_partMesh));
+            const auto resolved = m_program.resolvedBlock(static_cast<size_t>(m_selectedBlockIndex));
+            emit toolpathGenerated(resolved.generateToolpath(activeTool, finishTool, m_stockMesh.boundingBox, m_partMesh, m_toolLibrary));
         }
     });
 
@@ -1304,9 +1524,15 @@ QString ConversationalEditorDialog::blockListLabel(int index) const {
     const auto& b = m_program[index];
     if (b.type == CAM::BlockType::PatternEnd && depth > 0) --depth;
 
-    return QString("%1[%2] %3")
+    QString typeText = CAM::blockTypeToString(b.type);
+    if (b.type == CAM::BlockType::Contour && b.contourRole == CAM::ContourRole::Pocket) typeText = QStringLiteral("Kontur-Tasche");
+    if (b.type == CAM::BlockType::Contour && b.contourRole == CAM::ContourRole::Island) typeText = QStringLiteral("Insel");
+    const bool attached = b.type == CAM::BlockType::DrillPositions
+        || (b.type == CAM::BlockType::Contour && b.contourRole == CAM::ContourRole::Island);
+    return QString("%1%2[%3] %4")
         .arg(QStringLiteral("│   ").repeated(depth))
-        .arg(CAM::blockTypeToString(b.type))
+        .arg(attached ? QStringLiteral("  ↳ ") : QString())
+        .arg(typeText)
         .arg(b.name);
 }
 
@@ -1425,10 +1651,32 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
     m_spinFinishStep->setValue(b.finishStepDown);
     m_cmbApproach->setCurrentIndex(b.approachType);
 
-    // Fräsart-Dropdown nur bei relevanten Blocktypen anzeigen
-    bool showMillingType = (b.type == CAM::BlockType::Contour ||
-                            b.type == CAM::BlockType::Pocket ||
+    // Fräsart-Dropdown nur bei relevanten Blocktypen anzeigen (Kontur: Bahnkorrektur auf der Kontur-Seite)
+    bool showMillingType = (b.type == CAM::BlockType::Pocket ||
                             b.type == CAM::BlockType::Slot);
+
+    // Gemeinsame Felder nur abfragen, wo sie gebraucht werden (Hurco: Bohrungen nur Z, Bohrpositionen nur X/Y)
+    const bool isDrill = b.type == CAM::BlockType::Drill;
+    const bool isPositions = b.type == CAM::BlockType::DrillPositions;
+    const bool isIsland = b.type == CAM::BlockType::Contour && b.contourRole == CAM::ContourRole::Island;
+    // Positionsliste: Koordinaten stehen in der Tabelle
+    const bool showXY = !isDrill && b.type != CAM::BlockType::Contour
+        && !(isPositions && b.drillPattern == CAM::DrillPattern::Manual);
+    const bool showZ = !isPositions && !isIsland;
+    for (QWidget* w : {static_cast<QWidget*>(m_lblPosX), static_cast<QWidget*>(m_spinPosX),
+                       static_cast<QWidget*>(m_lblPosY), static_cast<QWidget*>(m_spinPosY)}) {
+        w->setVisible(showXY);
+    }
+    for (QWidget* w : {static_cast<QWidget*>(m_lblStartZ), static_cast<QWidget*>(m_spinStartZ),
+                       static_cast<QWidget*>(m_lblTargetZ), static_cast<QWidget*>(m_spinTargetZ)}) {
+        w->setVisible(showZ);
+    }
+    const bool zCaps = isDrill || b.type == CAM::BlockType::Contour;
+    m_lblStartZ->setText(zCaps ? QStringLiteral("Z START:") : QStringLiteral("Z-Start:"));
+    m_lblTargetZ->setText(zCaps ? QStringLiteral("Z UNTEN:") : QStringLiteral("Z-Tiefe:"));
+    const bool listPositions = isPositions && b.drillPattern == CAM::DrillPattern::Single;
+    m_lblPosX->setText(isPositions && !listPositions ? QStringLiteral("Mitte X:") : QStringLiteral("X:"));
+    m_lblPosY->setText(isPositions && !listPositions ? QStringLiteral("Mitte Y:") : QStringLiteral("Y:"));
     m_cmbMillingType->setVisible(showMillingType);
     m_lblMillingType->setVisible(showMillingType);
 
@@ -1451,6 +1699,10 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
             m_spinTabWidth->setValue(b.tabWidth);
             m_spinTabHeight->setValue(b.tabHeight);
             m_lblContourStatus->setText(b.contour.empty() ? QStringLiteral("Standard-Rechteck") : QString("%1 Punkte").arg(b.contour.points.size()));
+            m_cmbContourRole->setCurrentIndex(static_cast<int>(b.contourRole));
+            m_chkContourZForAll->setChecked(b.contourZForAll);
+            m_cmbContourPocketStrategy->setCurrentIndex(std::clamp(b.pocketStrategy, 0, 2));
+            updateContourRoleVisibility();
             break;
         case CAM::BlockType::Pocket:
             m_stackParams->setCurrentIndex(2);
@@ -1477,13 +1729,15 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
             break;
         case CAM::BlockType::Drill:
             m_stackParams->setCurrentIndex(3);
-            m_cmbDrillCycle->setCurrentIndex(b.drillCycle);
+            if (b.drillOps.empty()) m_program[index].convertLegacyDrillCycle();
+            refreshDrillOpList();
+            break;
+        case CAM::BlockType::DrillPositions:
+            m_stackParams->setCurrentIndex(10);
             m_cmbDrillPattern->setCurrentIndex(static_cast<int>(b.drillPattern));
             m_spinBoltRadius->setValue(b.boltCircleRadius);
             m_spinBoltCount->setValue(b.boltCircleHoleCount);
             m_spinBoltStartAngle->setValue(b.boltCircleStartAngle);
-            m_spinPeckDepth->setValue(b.peckDepth);
-            m_spinDwellTime->setValue(b.dwellTimeSec);
             m_spinGridCols->setValue(b.gridCols);
             m_spinGridRows->setValue(b.gridRows);
             m_spinGridPitchX->setValue(b.gridPitchX);
@@ -1515,6 +1769,10 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
                 }
                 m_tblManualPositions->blockSignals(false);
             }
+            m_stackDrillPattern->setCurrentIndex(static_cast<int>(b.drillPattern));
+            m_lblDrillPatternHint->setText(b.drillPattern == CAM::DrillPattern::Manual
+                ? QStringLiteral("Positionsliste: absolute X/Y-Koordinaten je Bohrung.")
+                : QStringLiteral("Lage bezogen auf Mitte X/Y (oben). Gilt für den vorangehenden Bohrungen-Block."));
             break;
         case CAM::BlockType::Slot:
             m_stackParams->setCurrentIndex(5);
@@ -1578,13 +1836,20 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
             break;
     }
 
-    // Technologie (Werkzeug, Schnittwerte) ist für Musterblöcke ohne Bedeutung
-    if (m_techTabWidget) m_techTabWidget->setVisible(!b.isPatternBlock());
+    // Technologie (Werkzeug, Schnittwerte) ist für Muster, Bohrpositionen und Inseln ohne Bedeutung;
+    // Bohrungen haben Werkzeug und Schnittwerte je Bohrvorgang (PROCESS)
+    if (m_techTabWidget) {
+        m_techTabWidget->setVisible(!b.isPatternBlock() && !isPositions && !isIsland);
+        m_techTabWidget->setTabVisible(0, !isDrill);
+        m_techTabWidget->setTabVisible(1, !isDrill);
+        if (isDrill && m_techTabWidget->currentIndex() < 2) m_techTabWidget->setCurrentIndex(2);
+    }
 
     // Header-Werkzeug auf den Block synchronisieren
-    Core::ToolDefinition blockTool(b.toolId, "Fräser", Core::ToolType::EndMill, 6.0);
+    const int headerToolId = (isDrill && !m_program[index].drillOps.empty()) ? m_program[index].drillOps.front().toolId : b.toolId;
+    Core::ToolDefinition blockTool(headerToolId, "Fräser", Core::ToolType::EndMill, 6.0);
     for (const auto& t : m_toolLibrary) {
-        if (t.id == b.toolId) { blockTool = t; break; }
+        if (t.id == headerToolId) { blockTool = t; break; }
     }
     emit activeToolChanged(blockTool);
 
@@ -1633,8 +1898,15 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
         b.tabCount = m_spinTabCount->value();
         b.tabWidth = m_spinTabWidth->value();
         b.tabHeight = m_spinTabHeight->value();
+        b.contourRole = static_cast<CAM::ContourRole>(std::clamp(m_cmbContourRole->currentIndex(), 0, 2));
+        b.contourZForAll = m_chkContourZForAll->isChecked();
+        if (b.contourRole == CAM::ContourRole::Pocket) b.pocketStrategy = m_cmbContourPocketStrategy->currentIndex();
         // Block-Z-Ebenen → Segment 0 und alle Folgesegmente mit bisheriger Tiefe
         Geometry::Contour::applyStartDepth(b.segments, b.startZ, b.targetZ);
+        if (b.contourZForAll || b.contourRole != CAM::ContourRole::Profile) {
+            for (size_t k = 1; k < b.segments.size(); ++k) b.segments[k].z = b.targetZ; // eine Tiefe für alle Segmente
+        }
+        updateContourRoleVisibility();
     } else if (b.type == CAM::BlockType::Pocket) {
         b.pocketShape = static_cast<CAM::PocketShape>(m_cmbPocketShape->currentIndex());
         b.pocketWidthX = m_spinPocketWidthX->value();
@@ -1649,13 +1921,17 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
         b.finishFeedRate = m_spinFinishFeed->value();
         b.finishSpindleRpm = m_spinFinishSpindle->value();
     } else if (b.type == CAM::BlockType::Drill) {
-        b.drillCycle = m_cmbDrillCycle->currentIndex();
+        // Block-Werkzeug und Schnittwerte = erster Bohrvorgang (Kopfzeile, Simulation, Kollisionsprüfung)
+        if (!b.drillOps.empty()) {
+            b.toolId = b.drillOps.front().toolId;
+            b.spindleRpm = b.drillOps.front().spindleRpm;
+            b.plungeFeedRate = b.drillOps.front().effectiveFeed();
+        }
+    } else if (b.type == CAM::BlockType::DrillPositions) {
         b.drillPattern = static_cast<CAM::DrillPattern>(m_cmbDrillPattern->currentIndex());
         b.boltCircleRadius = m_spinBoltRadius->value();
         b.boltCircleHoleCount = m_spinBoltCount->value();
         b.boltCircleStartAngle = m_spinBoltStartAngle->value();
-        b.peckDepth = m_spinPeckDepth->value();
-        b.dwellTimeSec = m_spinDwellTime->value();
         b.gridCols = m_spinGridCols->value();
         b.gridRows = m_spinGridRows->value();
         b.gridPitchX = m_spinGridPitchX->value();
@@ -1685,6 +1961,10 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
                 b.manualPositions.push_back({mx, my});
             }
         }
+        m_stackDrillPattern->setCurrentIndex(static_cast<int>(b.drillPattern));
+        m_lblDrillPatternHint->setText(b.drillPattern == CAM::DrillPattern::Manual
+            ? QStringLiteral("Positionsliste: absolute X/Y-Koordinaten je Bohrung.")
+            : QStringLiteral("Lage bezogen auf Mitte X/Y (oben). Gilt für den vorangehenden Bohrungen-Block."));
     } else if (b.type == CAM::BlockType::Slot) {
         b.slotLength = m_spinSlotLength->value();
         b.slotWidth = m_spinSlotWidth->value();
@@ -1733,11 +2013,260 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
     recordUndoState(QStringLiteral("Block %1 ändern").arg(m_selectedBlockIndex + 1), true);
 }
 
+// ═══════════════════════════════════════════════════════════
+// Bohrungen: Bohrvorgänge (Hurco WinMax)
+// ═══════════════════════════════════════════════════════════
+
+namespace {
+
+// Passendes Werkzeug aus der Bibliothek für einen Bohrvorgang
+int preferredDrillToolId(const QList<Core::ToolDefinition>& tools, CAM::DrillOperationType type, int fallback) {
+    using DOT = CAM::DrillOperationType;
+    Core::ToolType wanted = Core::ToolType::Drill;
+    if (type == DOT::SpotFace || type == DOT::Bore) wanted = Core::ToolType::EndMill;
+    if (type == DOT::Countersink || type == DOT::NcSpotDrill) wanted = Core::ToolType::ChamferMill;
+    for (const auto& t : tools) {
+        if (t.type == wanted) return t.id;
+    }
+    for (const auto& t : tools) {
+        if (t.type == Core::ToolType::Drill) return t.id;
+    }
+    return fallback > 0 ? fallback : (tools.isEmpty() ? 1 : tools.first().id);
+}
+
+} // namespace
+
+void ConversationalEditorDialog::calculateDrillOpTechnology(CAM::DrillOperation& op) const {
+    using DOT = CAM::DrillOperationType;
+    const auto mat = m_materialDb.findById(m_cmbMaterial ? m_cmbMaterial->currentData().toInt() : 1);
+    double diameter = 6.0;
+    for (const auto& t : m_toolLibrary) {
+        if (t.id == op.toolId) { diameter = std::max(0.5, t.diameter); break; }
+    }
+
+    // Schnittgeschwindigkeit und Vorschub je Umdrehung relativ zu den Fräswerten des Werkstoffs
+    double vcFactor = 0.35;   // Bohren
+    double feedPerRev = 0.015 * diameter + 0.02;
+    switch (op.type) {
+        case DOT::CenterDrill: case DOT::NcSpotDrill: case DOT::Countersink:
+            vcFactor = 0.3;  feedPerRev = 0.008 * diameter + 0.02; break;
+        case DOT::SpotFace:
+            vcFactor = 0.3;  feedPerRev = 0.006 * diameter + 0.02; break;
+        case DOT::Tap: case DOT::RigidTap:
+            vcFactor = 0.06; break;
+        case DOT::Ream:
+            vcFactor = 0.2;  feedPerRev = 0.03 * diameter + 0.05; break;
+        case DOT::Bore:
+            vcFactor = 0.5;  feedPerRev = 0.01 * diameter + 0.03; break;
+        default:
+            break;
+    }
+    feedPerRev *= std::clamp(mat.fzBase / 0.04, 0.3, 2.0);
+    const double rpm = std::clamp(mat.vc * vcFactor * 1000.0 / (3.14159265358979323846 * diameter), 50.0, 24000.0);
+    op.spindleRpm = std::round(rpm / 10.0) * 10.0;
+    if (!op.isTapping()) op.plungeFeed = std::max(5.0, std::round(rpm * feedPerRev));
+}
+
+void ConversationalEditorDialog::addDrillOperation(CAM::DrillOperationType type) {
+    if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+    auto& b = m_program[m_selectedBlockIndex];
+    if (b.type != CAM::BlockType::Drill) return;
+
+    const UndoGroup undoGroup(this, QStringLiteral("Bohrvorgang %1 hinzufügen").arg(CAM::drillOperationName(type)));
+    auto op = CAM::DrillOperation::createDefault(type, preferredDrillToolId(m_toolLibrary, type, b.toolId));
+    calculateDrillOpTechnology(op);
+    b.drillOps.push_back(op);
+    m_selectedDrillOp = static_cast<int>(b.drillOps.size()) - 1;
+    refreshDrillOpList();
+    saveCurrentBlockFromUi();
+}
+
+void ConversationalEditorDialog::refreshDrillOpList() {
+    if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+    const auto& b = m_program[m_selectedBlockIndex];
+    const bool wasUpdating = m_isUpdatingUi;
+    m_isUpdatingUi = true;
+
+    m_listDrillOps->clear();
+    for (size_t i = 0; i < b.drillOps.size(); ++i) {
+        const auto& op = b.drillOps[i];
+        m_listDrillOps->addItem(QStringLiteral("%1.  %2   (T%3)").arg(i + 1).arg(CAM::drillOperationName(op.type).toUpper()).arg(op.toolId));
+    }
+    auto* endItem = new QListWidgetItem(QStringLiteral("%1.  BOHRVORGANG ENDE").arg(b.drillOps.size() + 1));
+    endItem->setFlags(Qt::ItemIsEnabled);
+    endItem->setForeground(QColor(0x71, 0x80, 0x96));
+    m_listDrillOps->addItem(endItem);
+
+    m_selectedDrillOp = std::clamp(m_selectedDrillOp, 0, std::max(0, static_cast<int>(b.drillOps.size()) - 1));
+    if (!b.drillOps.empty()) m_listDrillOps->setCurrentRow(m_selectedDrillOp);
+
+    // Bohrpositionen aus den folgenden Bohrpositionen-Blöcken
+    const auto resolved = m_program.resolvedBlock(static_cast<size_t>(m_selectedBlockIndex));
+    if (resolved.resolvedDrillPositions.empty()) {
+        m_lblDrillPositionsInfo->setText(QStringLiteral("⚠ Noch keine Bohrpositionen: direkt nach diesem Block einen Block „Bohrpositionen“ anfügen."));
+        m_lblDrillPositionsInfo->setStyleSheet("color: #F6AD55; font-weight: bold;");
+    } else {
+        m_lblDrillPositionsInfo->setText(QStringLiteral("✔ %1 Bohrposition(en) aus den folgenden Bohrpositionen-Blöcken")
+                                             .arg(resolved.resolvedDrillPositions.size()));
+        m_lblDrillPositionsInfo->setStyleSheet("color: #68D391; font-weight: bold;");
+    }
+
+    loadDrillOpToUi();
+    m_isUpdatingUi = wasUpdating;
+}
+
+void ConversationalEditorDialog::loadDrillOpToUi() {
+    if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+    const auto& b = m_program[m_selectedBlockIndex];
+    const bool hasOp = m_selectedDrillOp >= 0 && m_selectedDrillOp < static_cast<int>(b.drillOps.size());
+    m_grpDrillProcess->setEnabled(hasOp);
+    if (!hasOp) return;
+
+    using DOT = CAM::DrillOperationType;
+    const auto& op = b.drillOps[static_cast<size_t>(m_selectedDrillOp)];
+    const bool wasUpdating = m_isUpdatingUi;
+    m_isUpdatingUi = true;
+
+    m_grpDrillProcess->setTitle(QStringLiteral("PROCESS – %1").arg(CAM::drillOperationName(op.type).toUpper()));
+    const int toolIdx = m_cmbDrillOpTool->findData(op.toolId);
+    if (toolIdx >= 0) m_cmbDrillOpTool->setCurrentIndex(toolIdx);
+    m_cmbDrillCycleType->setCurrentIndex(static_cast<int>(op.cycleType));
+    m_spinDrillPeck->setValue(op.peckDepth);
+    m_spinDrillRetract->setValue(op.retractDistance);
+    m_spinDrillDwell->setValue(op.dwellSec);
+    m_spinDrillDiameter->setValue(op.diameter);
+    m_spinDrillTipAngle->setValue(op.tipAngleDeg);
+    m_chkDrillOwnDepth->setChecked(op.ownDepth);
+    m_spinDrillDepth->setValue(op.depthZ);
+    m_spinDrillPitch->setValue(op.threadPitch);
+    m_cmbDrillBoreType->setCurrentIndex(op.boreSpindleStop ? 1 : 0);
+    m_spinDrillRpm->setValue(op.spindleRpm);
+    m_spinDrillFeed->setValue(op.effectiveFeed());
+
+    // Nur die für diesen Bohrvorgang nötigen Daten abfragen
+    const bool cycleOp = op.usesDrillCycleType();
+    const bool pecking = cycleOp && (op.cycleType == CAM::DrillCycleType::ChipBreak || op.cycleType == CAM::DrillCycleType::DeepHole);
+    const bool dwell = cycleOp ? op.cycleType == CAM::DrillCycleType::Dwell
+                               : (!op.isTapping() && op.type != DOT::Ream);
+    const bool spotFace = op.type == DOT::SpotFace;
+    m_drillProcessForm->setRowVisible(m_cmbDrillCycleType, cycleOp);
+    m_drillProcessForm->setRowVisible(m_spinDrillPeck, pecking);
+    m_drillProcessForm->setRowVisible(m_spinDrillRetract, cycleOp && op.cycleType == CAM::DrillCycleType::ChipBreak);
+    m_drillProcessForm->setRowVisible(m_spinDrillDwell, dwell);
+    m_drillProcessForm->setRowVisible(m_spinDrillDiameter, op.usesDiameter());
+    m_drillProcessForm->setRowVisible(m_spinDrillTipAngle, op.usesDiameter());
+    m_drillProcessForm->setRowVisible(m_chkDrillOwnDepth, !spotFace);
+    m_drillProcessForm->setRowVisible(m_spinDrillDepth, spotFace || op.ownDepth);
+    m_drillProcessForm->setRowVisible(m_spinDrillPitch, op.isTapping());
+    m_drillProcessForm->setRowVisible(m_cmbDrillBoreType, op.type == DOT::Bore);
+    m_spinDrillFeed->setEnabled(!op.isTapping());
+    m_spinDrillFeed->setToolTip(op.isTapping() ? QStringLiteral("Gewindebohren: Vorschub = Drehzahl × Steigung") : QString());
+
+    const double bottom = op.bottomZ(b.startZ, b.targetZ);
+    static const char* cycleNames[] = {"G81", "G83", "G73", "G84", "G85", "G86"};
+    QString cycleName = QString::fromLatin1(cycleNames[std::clamp(op.cycleCode(), 0, 5)]);
+    if (op.cycleCode() == 0 && dwell && op.dwellSec > 1e-6) cycleName = QStringLiteral("G82");
+    QString info = QStringLiteral("Endtiefe Z %1 mm · Zyklus %2").arg(bottom, 0, 'f', 3).arg(cycleName);
+    if (op.isTapping()) info += QStringLiteral(" · Vorschub %1 mm/min").arg(op.effectiveFeed(), 0, 'f', 1);
+    if (bottom > b.startZ - 1e-6) info += QStringLiteral("  ⚠ Tiefe liegt nicht unter Z START");
+    m_lblDrillOpInfo->setText(info);
+
+    m_isUpdatingUi = wasUpdating;
+}
+
+void ConversationalEditorDialog::saveDrillOpFromUi() {
+    if (m_isUpdatingUi) return;
+    if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+    auto& b = m_program[m_selectedBlockIndex];
+    if (m_selectedDrillOp < 0 || m_selectedDrillOp >= static_cast<int>(b.drillOps.size())) return;
+
+    auto& op = b.drillOps[static_cast<size_t>(m_selectedDrillOp)];
+    op.toolId = m_cmbDrillOpTool->currentData().toInt();
+    op.cycleType = static_cast<CAM::DrillCycleType>(std::clamp(m_cmbDrillCycleType->currentIndex(), 0, 3));
+    op.peckDepth = m_spinDrillPeck->value();
+    op.retractDistance = m_spinDrillRetract->value();
+    op.dwellSec = m_spinDrillDwell->value();
+    op.diameter = m_spinDrillDiameter->value();
+    op.tipAngleDeg = m_spinDrillTipAngle->value();
+    op.ownDepth = m_chkDrillOwnDepth->isChecked();
+    op.depthZ = m_spinDrillDepth->value();
+    op.threadPitch = m_spinDrillPitch->value();
+    op.boreSpindleStop = m_cmbDrillBoreType->currentIndex() == 1;
+    op.spindleRpm = m_spinDrillRpm->value();
+    if (!op.isTapping()) op.plungeFeed = m_spinDrillFeed->value();
+
+    // Vorschub beim Gewinde und Hinweistexte nachführen
+    const bool wasUpdating = m_isUpdatingUi;
+    m_isUpdatingUi = true;
+    if (op.isTapping()) m_spinDrillFeed->setValue(op.effectiveFeed());
+    if (auto* item = m_listDrillOps->item(m_selectedDrillOp)) {
+        item->setText(QStringLiteral("%1.  %2   (T%3)").arg(m_selectedDrillOp + 1).arg(CAM::drillOperationName(op.type).toUpper()).arg(op.toolId));
+    }
+    m_isUpdatingUi = wasUpdating;
+
+    loadDrillOpToUi(); // Endtiefe/Zyklus-Hinweis aktualisieren
+    saveCurrentBlockFromUi();
+}
+
+void ConversationalEditorDialog::updateContourRoleVisibility() {
+    if (!m_contourForm || !m_cmbContourRole) return;
+    const auto role = static_cast<CAM::ContourRole>(std::clamp(m_cmbContourRole->currentIndex(), 0, 2));
+    const bool profile = role == CAM::ContourRole::Profile;
+    m_contourForm->setRowVisible(m_cmbContourSide, profile);
+    m_contourForm->setRowVisible(m_contourLeadRow, profile);
+    m_contourForm->setRowVisible(m_contourTabRow, profile);
+    m_contourForm->setRowVisible(m_chkContourZForAll, profile);
+    m_contourForm->setRowVisible(m_cmbContourPocketStrategy, role == CAM::ContourRole::Pocket);
+    switch (role) {
+        case CAM::ContourRole::Profile:
+            m_lblContourRoleInfo->setText(m_chkContourZForAll->isChecked()
+                ? QStringLiteral("Eine Tiefe (Z UNTEN) für alle Segmente.")
+                : QStringLiteral("Z END wird im Datensatz-Editor je Segment eingegeben."));
+            break;
+        case CAM::ContourRole::Pocket:
+            m_lblContourRoleInfo->setText(QStringLiteral("Tasche: Innenraum wird bis Z UNTEN ausgeräumt. Inseln = direkt folgende Kontur-Blöcke mit Konturart „Insel“."));
+            break;
+        case CAM::ContourRole::Island:
+            m_lblContourRoleInfo->setText(QStringLiteral("Insel: bleibt in der vorangehenden Kontur-Tasche stehen. Tiefe und Werkzeug kommen aus der Tasche."));
+            break;
+    }
+}
+
 void ConversationalEditorDialog::onAddBlockClicked(CAM::BlockType type) {
     const UndoGroup undoGroup(this, QStringLiteral("%1 hinzufügen").arg(CAM::blockTypeToString(type)));
-    int nextId = static_cast<int>(m_program.size()) + 1;
+    int nextId = m_program.nextBlockId();
     QString name = QString("%1: %2").arg(nextId).arg(CAM::blockTypeToString(type));
     CAM::ConversationalBlock newBlock(nextId, type, name);
+
+    if (type == CAM::BlockType::Contour) {
+        newBlock.contourZForAll = true; // Hurco: Z UNTEN von Segment 0 gilt für alle Segmente
+    }
+    if (type == CAM::BlockType::Drill) {
+        newBlock.startZ = 0.0;
+        newBlock.targetZ = -10.0;
+        auto op = CAM::DrillOperation::createDefault(CAM::DrillOperationType::Drill,
+                                                     preferredDrillToolId(m_toolLibrary, CAM::DrillOperationType::Drill, newBlock.toolId));
+        calculateDrillOpTechnology(op);
+        newBlock.drillOps.push_back(op);
+        newBlock.toolId = op.toolId;
+        m_selectedDrillOp = 0;
+    }
+    if (type == CAM::BlockType::DrillPositions) {
+        // Bohrpositionen gehören zum vorangehenden Bohrungen-Block: direkt nach dem gewählten Block einfügen
+        newBlock.drillPattern = CAM::DrillPattern::Single;
+        newBlock.posX = 0.0;
+        newBlock.posY = 0.0;
+        size_t insertAt = m_program.size();
+        if (m_selectedBlockIndex >= 0 && m_selectedBlockIndex < static_cast<int>(m_program.size())) {
+            insertAt = static_cast<size_t>(m_selectedBlockIndex) + 1;
+            while (insertAt < m_program.size() && m_program[insertAt].type == CAM::BlockType::DrillPositions) ++insertAt;
+        }
+        m_program.insertBlock(insertAt, newBlock);
+        m_selectedBlockIndex = static_cast<int>(insertAt);
+        refreshBlockList();
+        loadBlockToUi(m_selectedBlockIndex);
+        return;
+    }
 
     if (type == CAM::BlockType::Stl3D) {
         newBlock.stlStrategy = CAM::StlMillingStrategy::RoughAndFinishX;
@@ -1820,6 +2349,17 @@ void ConversationalEditorDialog::onToolChanged(int index) {
 
 void ConversationalEditorDialog::onCalculateTechnology() {
     if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+    const auto blockType = m_program[m_selectedBlockIndex].type;
+    if (blockType == CAM::BlockType::DrillPositions) return;
+    if (blockType == CAM::BlockType::Drill) {
+        if (m_isUpdatingUi) return;
+        const UndoGroup undoGroup(this, QStringLiteral("Schnittwerte berechnen"), true);
+        m_program[m_selectedBlockIndex].materialId = m_cmbMaterial->currentData().toInt();
+        for (auto& op : m_program[m_selectedBlockIndex].drillOps) calculateDrillOpTechnology(op);
+        refreshDrillOpList();
+        saveCurrentBlockFromUi();
+        return;
+    }
 
     int matId = m_cmbMaterial->currentData().toInt();
     int toolId = m_cmbTool->currentData().toInt();
@@ -1954,6 +2494,7 @@ void ConversationalEditorDialog::onManageIslandsClicked() {
     
     m_editingIslandIndex = 0; // Edit the first island
     m_segmentEditorMode = SegmentEditorMode::PocketIsland;
+    m_segmentEditor->setContourOptions(static_cast<int>(CAM::ContourRole::Island), true);
     
     m_segmentEditor->setSegments(b.pocketIslands[0]);
     m_masterStack->setCurrentIndex(1);
@@ -1980,6 +2521,7 @@ void ConversationalEditorDialog::showSegmentEditor() {
     // Z START / Z UNTEN von Segment 0 kommen aus dem Block; Folgesegmente übernehmen die Tiefe
     Geometry::Contour::applyStartDepth(segs, b.startZ, b.targetZ);
     m_segmentEditor->setTechnology(b.toolId, static_cast<int>(b.contourSide), b.feedRate, b.plungeFeedRate, b.spindleRpm, b.stepDown);
+    m_segmentEditor->setContourOptions(static_cast<int>(b.contourRole), b.contourZForAll);
     m_segmentEditor->setSegments(segs);
 
     // Zur Datensatz-Ansicht umschalten (Seite 1)

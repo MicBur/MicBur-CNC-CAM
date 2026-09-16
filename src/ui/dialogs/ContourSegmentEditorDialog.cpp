@@ -84,6 +84,24 @@ void ContourSegmentEditorDialog::setupUi() {
     connect(m_editLineAngle, &QLineEdit::textEdited, this, &ContourSegmentEditorDialog::onInputEdited);
 
     m_leftForm = leftLayout;
+
+    // Segment 0: Konturart und Tiefenregel (Hurco: Kontur, Tasche oder Insel)
+    m_cmbContourRole = new QComboBox(this);
+    m_cmbContourRole->addItems({QStringLiteral("KONTUR"), QStringLiteral("TASCHE"), QStringLiteral("INSEL")});
+    connect(m_cmbContourRole, &QComboBox::currentIndexChanged, this, [this](int idx) {
+        if (m_isLoading) return;
+        m_contourRole = std::clamp(idx, 0, 2);
+        applyContourOptions();
+    });
+    m_cmbZForAll = new QComboBox(this);
+    m_cmbZForAll->addItems({QStringLiteral("JA – eine Tiefe für alle Segmente"), QStringLiteral("NEIN – Z END je Segment")});
+    connect(m_cmbZForAll, &QComboBox::currentIndexChanged, this, [this](int idx) {
+        if (m_isLoading) return;
+        m_zForAll = (idx == 0);
+        applyContourOptions();
+    });
+    leftLayout->addRow(new QLabel(QStringLiteral("KONTURART:")), m_cmbContourRole);
+    leftLayout->addRow(new QLabel(QStringLiteral("Z FÜR ALLE:")), m_cmbZForAll);
     m_lblXCaption = new QLabel(QStringLiteral("X END:"));
     m_lblYCaption = new QLabel(QStringLiteral("Y END:"));
     m_lblZEndCaption = new QLabel(QStringLiteral("Z END:"));
@@ -188,6 +206,7 @@ void ContourSegmentEditorDialog::setupUi() {
     speedRow->addWidget(new QLabel(QStringLiteral("Drehzahl:"))); speedRow->addWidget(m_spinRpm);
     speedRow->addWidget(new QLabel(QStringLiteral("Zustellung:"))); speedRow->addWidget(m_spinPeckDepth);
 
+    m_roughForm = lRough;
     lRough->addRow(QStringLiteral("WERKZEUG:"), m_cmbTool);
     lRough->addRow(QStringLiteral("FRÄSART:"), m_cmbMillingType);
     lRough->addRow(QStringLiteral("GESCHWINDIGKEIT:"), feedRow);
@@ -322,6 +341,7 @@ void ContourSegmentEditorDialog::loadStep(int index) {
     m_leftForm->setRowVisible(m_editZStart, isStart);
     m_leftForm->setRowVisible(m_editLineLength, !isStart);
     m_leftForm->setRowVisible(m_editLineAngle, !isStart);
+    updateDepthFieldVisibility();
 
     double dx = seg.x - sX;
     double dy = seg.y - sY;
@@ -356,6 +376,11 @@ void ContourSegmentEditorDialog::saveCurrentStep() {
     if (m_currentIndex == 0 && seg.type == Geometry::ContourSegmentType::StartPoint) {
         // Tiefe von Segment 0 an alle Folgesegmente mit bisheriger Tiefe weitergeben
         Geometry::Contour::applyStartDepth(m_segments, okZStart ? vzStart : seg.zStart, okZ ? vz : seg.z);
+        if (!perSegmentDepth()) {
+            for (size_t k = 1; k < m_segments.size(); ++k) m_segments[k].z = m_segments.front().z;
+        }
+    } else if (!perSegmentDepth()) {
+        if (!m_segments.empty()) seg.z = m_segments.front().z; // Tiefe aus Segment 0
     } else if (okZ) {
         seg.z = vz;
     }
@@ -573,6 +598,50 @@ void ContourSegmentEditorDialog::onTechnologyEdited() {
     const int idx = std::clamp(m_cmbMillingType->currentIndex(), 0, 2);
     emit technologyChanged(m_cmbTool->currentData().toInt(), sideForIndex[idx],
                            m_spinFeed->value(), m_spinPlunge->value(), m_spinRpm->value(), m_spinPeckDepth->value());
+}
+
+void ContourSegmentEditorDialog::setContourOptions(int role, bool zForAll) {
+    const bool wasLoading = m_isLoading;
+    m_isLoading = true;
+    m_contourRole = std::clamp(role, 0, 2);
+    m_zForAll = zForAll;
+    m_cmbContourRole->setCurrentIndex(m_contourRole);
+    m_cmbZForAll->setCurrentIndex(m_zForAll ? 0 : 1);
+    updateDepthFieldVisibility();
+    m_isLoading = wasLoading;
+}
+
+void ContourSegmentEditorDialog::applyContourOptions() {
+    saveCurrentStep();
+    if (!perSegmentDepth() && !m_segments.empty()) {
+        for (size_t k = 1; k < m_segments.size(); ++k) m_segments[k].z = m_segments.front().z;
+    }
+    emit contourOptionsChanged(m_contourRole, m_zForAll);
+    loadStep(m_currentIndex);
+    recompileContour();
+
+    static const QStringList prompts = {
+        QStringLiteral("Kontur: Fräsbahn entlang der Kontur (auf / innen / außen)."),
+        QStringLiteral("Tasche: Innenraum wird ausgeräumt – nur Z START und Z UNTEN nötig."),
+        QStringLiteral("Insel: bleibt in der vorangehenden Tasche stehen – Tiefe und Werkzeug kommen aus der Tasche.")
+    };
+    emit promptChanged(prompts[m_contourRole]);
+}
+
+void ContourSegmentEditorDialog::updateDepthFieldVisibility() {
+    if (!m_leftForm || !m_cmbContourRole) return;
+    const bool isStart = m_currentIndex == 0 && !m_segments.empty()
+        && m_segments.front().type == Geometry::ContourSegmentType::StartPoint;
+    const bool profile = m_contourRole == 0;
+    const bool island = m_contourRole == 2;
+
+    m_leftForm->setRowVisible(m_cmbContourRole, isStart);
+    m_leftForm->setRowVisible(m_cmbZForAll, isStart && profile);
+    m_leftForm->setRowVisible(m_editZStart, isStart && !island);
+    m_leftForm->setRowVisible(m_editLineZEnd, isStart ? !island : perSegmentDepth());
+    if (m_arcForm) m_arcForm->setRowVisible(m_editArcZEnd, perSegmentDepth());
+    if (m_techTabs) m_techTabs->setVisible(!island);
+    if (m_roughForm) m_roughForm->setRowVisible(m_cmbMillingType, profile);
 }
 
 bool ContourSegmentEditorDialog::isArcStep(int index) const {

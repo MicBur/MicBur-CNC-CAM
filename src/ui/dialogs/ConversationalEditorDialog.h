@@ -157,6 +157,10 @@ private:
     // ─── Globale Optionen (unter Z-Ebenen) ───
     QDoubleSpinBox* m_spinPosX{nullptr};
     QDoubleSpinBox* m_spinPosY{nullptr};
+    QLabel* m_lblPosX{nullptr};
+    QLabel* m_lblPosY{nullptr};
+    QLabel* m_lblStartZ{nullptr};
+    QLabel* m_lblTargetZ{nullptr};
     QComboBox* m_cmbMillDirection{nullptr};
     QCheckBox* m_chkCoolant{nullptr};
     QCheckBox* m_chkFinishPass{nullptr};
@@ -177,6 +181,14 @@ private:
     QDoubleSpinBox* m_spinTabWidth{nullptr};
     QDoubleSpinBox* m_spinTabHeight{nullptr};
     QSpinBox* m_spinTabCount{nullptr};
+    QFormLayout* m_contourForm{nullptr};
+    QComboBox* m_cmbContourRole{nullptr};      // Kontur / Tasche / Insel
+    QCheckBox* m_chkContourZForAll{nullptr};   // Z UNTEN für alle Segmente
+    QComboBox* m_cmbContourPocketStrategy{nullptr};
+    QLabel* m_lblContourRoleInfo{nullptr};
+    QLayout* m_contourLeadRow{nullptr};
+    QLayout* m_contourTabRow{nullptr};
+    void updateContourRoleVisibility();
     QPushButton* m_btnPickContour{nullptr};
     QPushButton* m_btnEditSegments{nullptr};
     QLabel* m_lblContourStatus{nullptr};
@@ -225,12 +237,36 @@ private:
     QComboBox* m_cmbHelixDir{nullptr};
     QSpinBox* m_spinHelixStarts{nullptr};
 
-    // ─── Bohren Seite ───
-    QComboBox* m_cmbDrillCycle{nullptr};
+    // ─── Bohrungen Seite (Hurco: Bohrvorgänge mit PROCESS-Daten) ───
+    QListWidget* m_listDrillOps{nullptr};
+    int m_selectedDrillOp{0};
+    QGroupBox* m_grpDrillProcess{nullptr};
+    QFormLayout* m_drillProcessForm{nullptr};
+    QComboBox* m_cmbDrillOpTool{nullptr};
+    QComboBox* m_cmbDrillCycleType{nullptr};
+    QDoubleSpinBox* m_spinDrillPeck{nullptr};
+    QDoubleSpinBox* m_spinDrillRetract{nullptr};
+    QDoubleSpinBox* m_spinDrillDwell{nullptr};
+    QDoubleSpinBox* m_spinDrillDiameter{nullptr};
+    QDoubleSpinBox* m_spinDrillTipAngle{nullptr};
+    QCheckBox* m_chkDrillOwnDepth{nullptr};
+    QDoubleSpinBox* m_spinDrillDepth{nullptr};
+    QDoubleSpinBox* m_spinDrillPitch{nullptr};
+    QComboBox* m_cmbDrillBoreType{nullptr};
+    QDoubleSpinBox* m_spinDrillRpm{nullptr};
+    QDoubleSpinBox* m_spinDrillFeed{nullptr};
+    QLabel* m_lblDrillOpInfo{nullptr};
+    QLabel* m_lblDrillPositionsInfo{nullptr};
+    void refreshDrillOpList();
+    void loadDrillOpToUi();
+    void saveDrillOpFromUi();
+    void addDrillOperation(CAM::DrillOperationType type);
+    void calculateDrillOpTechnology(CAM::DrillOperation& op) const;
+
+    // ─── Bohrpositionen Seite ───
     QComboBox* m_cmbDrillPattern{nullptr};
     QStackedWidget* m_stackDrillPattern{nullptr};
-    QDoubleSpinBox* m_spinPeckDepth{nullptr};
-    QDoubleSpinBox* m_spinDwellTime{nullptr};
+    QLabel* m_lblDrillPatternHint{nullptr};
     QDoubleSpinBox* m_spinBoltRadius{nullptr};
     QSpinBox* m_spinBoltCount{nullptr};
     QDoubleSpinBox* m_spinBoltStartAngle{nullptr};

@@ -347,6 +347,39 @@ void testEditorUndoRedo() {
     std::cout << "testEditorUndoRedo PASSED!" << std::endl;
 }
 
+void testEditorHurcoDrilling() {
+    std::cout << "Running testEditorHurcoDrilling..." << std::endl;
+    UI::ConversationalEditorDialog editor;
+
+    // Beispielprogramm: alter Bohrblock als Bohrungen + Bohrpositionen
+    bool drillWithPositions = false;
+    for (size_t i = 0; i + 1 < editor.program().size(); ++i) {
+        if (editor.program()[i].type == CAM::BlockType::Drill && !editor.program()[i].drillOps.empty()
+            && editor.program()[i + 1].type == CAM::BlockType::DrillPositions) {
+            drillWithPositions = true;
+        }
+    }
+    check(drillWithPositions, "Beispielprogramm: Bohrungen mit folgendem Bohrpositionen-Block erwartet");
+
+    const size_t n = editor.program().size();
+    editor.onAddBlockClicked(CAM::BlockType::Drill);
+    check(editor.program().size() == n + 1 && editor.program()[n].type == CAM::BlockType::Drill
+          && editor.program()[n].drillOps.size() == 1
+          && editor.program()[n].drillOps.front().type == CAM::DrillOperationType::Drill,
+          "Neuer Bohrungen-Block braucht einen Bohrvorgang BOHRER");
+
+    editor.onBlockSelectionChanged(0);
+    editor.onBlockSelectionChanged(static_cast<int>(n));
+    editor.onAddBlockClicked(CAM::BlockType::DrillPositions);
+    check(editor.program().size() == n + 2 && editor.program()[n + 1].type == CAM::BlockType::DrillPositions,
+          "Bohrpositionen müssen direkt nach dem Bohrungen-Block stehen");
+
+    editor.onAddBlockClicked(CAM::BlockType::Contour);
+    check(editor.program()[editor.program().size() - 1].contourZForAll, "Neue Kontur: Z UNTEN gilt standardmäßig für alle Segmente");
+
+    std::cout << "testEditorHurcoDrilling PASSED!" << std::endl;
+}
+
 int main(int argc, char* argv[]) {
     qputenv("QT_PLUGIN_PATH", "G:/Qt/6.12.0/mingw_64/plugins");
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -379,6 +412,8 @@ int main(int argc, char* argv[]) {
     testWinMaxSoftkeys();
     std::cout << "[9/9] Starting testEditorUndoRedo..." << std::endl << std::flush;
     testEditorUndoRedo();
+    std::cout << "[10/10] Starting testEditorHurcoDrilling..." << std::endl << std::flush;
+    testEditorHurcoDrilling();
 
     std::cout << "=== All WinMax Tests PASSED Successfully! ===" << std::endl << std::flush;
     return 0;

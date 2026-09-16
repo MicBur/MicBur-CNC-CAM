@@ -16,6 +16,9 @@
 #include <set>
 #include "geometry/StlLoader.h"
 #include <QDir>
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QRegularExpression>
 #include <QStringList>
 #include <cstdlib>
@@ -927,6 +930,216 @@ void test3DStlMillingAndRotation() {
     std::cout << " -> PASSED (Total segments generated: " << tp.size() << ")" << std::endl;
 }
 
+void testHurcoDrillingAndContourRoles() {
+    std::cout << "[TEST] Hurco: Bohrungen + Bohrpositionen, Kontur-Tasche mit Insel..." << std::endl;
+    auto tools = Core::ToolDefinition::createDefaultLibrary();
+    Core::BoundingBox stock({-100, -100, -20}, {150, 100, 0});
+    Core::MachineConfig machine;
+
+    // ── Bohrbild folgt X/Y (Fehler: Bohrbild ließ sich nicht verschieben) ──
+    CAM::ConversationalBlock legacy(1, CAM::BlockType::Drill, QStringLiteral("Lochkreis alt"));
+    legacy.drillPattern = CAM::DrillPattern::BoltCircle;
+    legacy.boltCircleHoleCount = 4;
+    legacy.boltCircleRadius = 10.0;
+    legacy.posX = 30.0;
+    legacy.posY = -5.0;
+    legacy.targetZ = -5.0;
+    legacy.toolId = 1;
+    CAM::ConversationalProgram legacyProg;
+    legacyProg.addBlock(legacy);
+    const auto legacyHoles = plungeBottoms(legacyProg.generateFullToolpath(tools, stock), -5.0);
+    require(legacyHoles.size() == 4, "Lochkreis: 4 Bohrungen erwartet");
+    for (const auto& [kx, ky] : legacyHoles) {
+        require(std::abs(std::hypot(kx / 10.0 - 30.0, ky / 10.0 + 5.0) - 10.0) < 0.15, "Bohrbild liegt nicht um X/Y des Blocks");
+    }
+
+    // ── Bohrungen: Zentrieren → Tieflochbohren → Gewinde, Positionen aus zwei Bohrpositionen-Blöcken ──
+    CAM::ConversationalBlock holes(2, CAM::BlockType::Drill, QStringLiteral("Bohrungen"));
+    holes.startZ = 0.0;
+    holes.targetZ = -12.0;
+    auto center = CAM::DrillOperation::createDefault(CAM::DrillOperationType::NcSpotDrill, 2);
+    center.diameter = 4.0;
+    center.tipAngleDeg = 90.0;
+    auto drill = CAM::DrillOperation::createDefault(CAM::DrillOperationType::PeckDrill, 1);
+    drill.peckDepth = 4.0;
+    auto tap = CAM::DrillOperation::createDefault(CAM::DrillOperationType::Tap, 3);
+    tap.spindleRpm = 400.0;
+    tap.threadPitch = 1.25;
+    tap.ownDepth = true;
+    tap.depthZ = -10.0;
+    holes.drillOps = {center, drill, tap};
+
+    CAM::ConversationalBlock list(3, CAM::BlockType::DrillPositions, QStringLiteral("Liste"));
+    list.drillPattern = CAM::DrillPattern::Manual;
+    list.manualPositions = {{10.0, 10.0}, {20.0, 10.0}};
+    CAM::ConversationalBlock circle(4, CAM::BlockType::DrillPositions, QStringLiteral("Teilkreis"));
+    circle.drillPattern = CAM::DrillPattern::BoltCircle;
+    circle.boltCircleHoleCount = 3;
+    circle.boltCircleRadius = 15.0;
+    circle.posX = 60.0;
+    circle.posY = 20.0;
+
+    CAM::ConversationalProgram prog;
+    prog.addBlock(holes);
+    prog.addBlock(list);
+    prog.addBlock(circle);
+    require(prog.resolvedBlock(0).resolvedDrillPositions.size() == 5, "Bohrungen: 5 Positionen aus den Folgeblöcken erwartet");
+
+    const auto tp = prog.generateFullToolpath(tools, stock);
+    auto bottoms = [&tp](int toolId, double z) {
+        std::set<PosKey> keys;
+        for (const auto& s : tp.segments) {
+            if (s.toolId == toolId && s.motion != CAM::MotionType::Rapid
+                && std::abs(s.endPos.z - z) < 1e-6 && s.startPos.z > z + 1e-6) {
+                keys.insert(posKey(s.endPos.x, s.endPos.y));
+            }
+        }
+        return keys;
+    };
+    const auto spotted = bottoms(2, -2.0);
+    require(spotted.size() == 5, "NC-Anbohren: Tiefe aus Ø4 mm / 90° = 2 mm an allen Positionen");
+    require(spotted.count(posKey(10.0, 10.0)) && spotted.count(posKey(20.0, 10.0)) && spotted.count(posKey(75.0, 20.0)),
+            "Bohrpositionen (Liste / Teilkreis um Mitte X/Y) falsch");
+    require(bottoms(1, -12.0).size() == 5, "Tieflochbohren muss bis Z UNTEN bohren");
+    require(bottoms(3, -10.0).size() == 5, "Gewinde: eigene Tiefe nicht verwendet");
+    bool tapFeedOk = false;
+    for (const auto& s : tp.segments) {
+        if (s.toolId == 3 && s.motion == CAM::MotionType::LinearFeed) tapFeedOk = std::abs(s.feedRate - 500.0) < 1e-6;
+    }
+    require(tapFeedOk, "Gewinde: Vorschub muss Drehzahl × Steigung sein");
+
+    const QString iso = tp.exportWithPostProcessor(0, machine, tools);
+    const auto t2 = iso.indexOf(QStringLiteral("T2 M06"));
+    const auto t1 = iso.indexOf(QStringLiteral("T1 M06"));
+    const auto t3 = iso.indexOf(QStringLiteral("T3 M06"));
+    require(t2 >= 0 && t1 > t2 && t3 > t1, "Werkzeugwechsel in der Reihenfolge der Bohrvorgänge fehlen");
+    require(iso.contains(QStringLiteral("G98 G81")) && iso.contains(QStringLiteral("G98 G83")) && iso.contains(QStringLiteral("G98 G84")),
+            "G-Code: Zyklen G81/G83/G84 fehlen");
+    require(iso.count(QStringLiteral(" G80 ")) == 3, "G-Code: jeder Bohrvorgang braucht einen eigenen Zyklus");
+
+    CAM::ConversationalProgram noPositions;
+    noPositions.addBlock(holes);
+    require(noPositions.generateFullToolpath(tools, stock).empty(), "Bohrungen ohne Bohrpositionen dürfen nicht bohren");
+
+    // Speichern / Laden der Bohrvorgänge
+    const auto reloaded = CAM::ConversationalBlock::fromJson(holes.toJson());
+    require(reloaded.drillOps.size() == 3 && reloaded.drillOps[2].type == CAM::DrillOperationType::Tap
+            && reloaded.drillOps[2].ownDepth && std::abs(reloaded.drillOps[2].threadPitch - 1.25) < 1e-9
+            && std::abs(reloaded.drillOps[0].diameter - 4.0) < 1e-9,
+            "Bohrvorgänge nicht vollständig gespeichert");
+
+    // ── Ältere .gprog-Datei: Zyklus + Bohrbild in einem Block → Bohrungen + Bohrpositionen ──
+    QJsonObject legacyJson = legacy.toJson();
+    legacyJson.remove(QStringLiteral("drillOps"));
+    legacyJson[QStringLiteral("drillCycle")] = 1;
+    QJsonObject root;
+    root[QStringLiteral("programName")] = QStringLiteral("alt");
+    root[QStringLiteral("blocks")] = QJsonArray{legacyJson};
+    const QString legacyPath = QDir::temp().filePath(QStringLiteral("gemini_legacy_drill.gprog"));
+    {
+        QFile f(legacyPath);
+        require(f.open(QIODevice::WriteOnly), "Testdatei nicht schreibbar");
+        f.write(QJsonDocument(root).toJson());
+    }
+    const auto upgraded = CAM::ConversationalProgram::loadFromFile(legacyPath);
+    QFile::remove(legacyPath);
+    require(upgraded.size() == 2 && upgraded[0].type == CAM::BlockType::Drill && upgraded[1].type == CAM::BlockType::DrillPositions,
+            "Alter Bohrblock muss in Bohrungen + Bohrpositionen aufgeteilt werden");
+    require(upgraded[0].drillOps.size() == 1 && upgraded[0].drillOps[0].cycleType == CAM::DrillCycleType::DeepHole,
+            "Alter Bohrzyklus G83 nicht übernommen");
+    auto upgradedHoles = plungeBottoms(upgraded.generateFullToolpath(tools, stock), -5.0);
+    auto expectedHoles = legacyHoles;
+    std::sort(upgradedHoles.begin(), upgradedHoles.end());
+    std::sort(expectedHoles.begin(), expectedHoles.end());
+    upgradedHoles.erase(std::unique(upgradedHoles.begin(), upgradedHoles.end()), upgradedHoles.end());
+    require(upgradedHoles == expectedHoles, "Umgewandeltes Programm bohrt an anderen Positionen");
+
+    // ── Kontur als Tasche mit folgender Insel ──
+    auto rectSegs = [](double x0, double y0, double w, double h) {
+        using ST = Geometry::ContourSegmentType;
+        std::vector<Geometry::ContourSegment> segs(5);
+        segs[0].type = ST::StartPoint; segs[0].x = x0;     segs[0].y = y0;
+        segs[1].type = ST::Line;       segs[1].x = x0 + w; segs[1].y = y0;
+        segs[2].type = ST::Line;       segs[2].x = x0 + w; segs[2].y = y0 + h;
+        segs[3].type = ST::Line;       segs[3].x = x0;     segs[3].y = y0 + h;
+        segs[4].type = ST::Line;       segs[4].x = x0;     segs[4].y = y0;
+        return segs;
+    };
+    CAM::ConversationalBlock pocket(10, CAM::BlockType::Contour, QStringLiteral("Tasche"));
+    pocket.contourRole = CAM::ContourRole::Pocket;
+    pocket.contourZForAll = true;
+    pocket.segments = rectSegs(0.0, 0.0, 60.0, 40.0);
+    pocket.startZ = 0.0;
+    pocket.targetZ = -3.0;
+    pocket.stepDown = 3.0;
+    pocket.stepOver = 3.0;
+    pocket.toolId = 1;
+    CAM::ConversationalBlock island(11, CAM::BlockType::Contour, QStringLiteral("Insel"));
+    island.contourRole = CAM::ContourRole::Island;
+    island.segments = rectSegs(20.0, 15.0, 20.0, 10.0);
+    require(island.generateToolpath(tools.first(), tools.first(), stock).empty(), "Insel-Block darf selbst nicht fräsen");
+
+    auto islandDistance = [](double x, double y) {
+        const double dx = std::max({20.0 - x, 0.0, x - 40.0});
+        const double dy = std::max({15.0 - y, 0.0, y - 25.0});
+        return std::hypot(dx, dy);
+    };
+    CAM::ConversationalProgram pocketProg;
+    pocketProg.addBlock(pocket);
+    pocketProg.addBlock(island);
+    const auto pocketTp = pocketProg.generateFullToolpath(tools, stock);
+    int floorPoints = 0;
+    for (const auto& s : pocketTp.segments) {
+        if (s.motion == CAM::MotionType::Rapid || std::abs(s.endPos.z + 3.0) > 1e-6) continue;
+        ++floorPoints;
+        require(s.endPos.x > 2.9 && s.endPos.x < 57.1 && s.endPos.y > 2.9 && s.endPos.y < 37.1, "Taschenbahn verlässt die Kontur");
+        if (std::abs(s.startPos.z + 3.0) > 1e-6) continue;
+        for (int k = 0; k <= 20; ++k) {
+            const double t = k / 20.0;
+            const double x = s.startPos.x + (s.endPos.x - s.startPos.x) * t;
+            const double y = s.startPos.y + (s.endPos.y - s.startPos.y) * t;
+            require(islandDistance(x, y) >= 2.9, "Taschenbahn fräst in die Insel");
+        }
+    }
+    require(floorPoints > 20, "Kontur-Tasche wird nicht ausgeräumt");
+
+    CAM::ConversationalProgram pocketOnly;
+    pocketOnly.addBlock(pocket);
+    bool crossesIsland = false;
+    for (const auto& s : pocketOnly.generateFullToolpath(tools, stock).segments) {
+        if (s.motion == CAM::MotionType::Rapid || std::abs(s.endPos.z + 3.0) > 1e-6 || std::abs(s.startPos.z + 3.0) > 1e-6) continue;
+        for (int k = 0; k <= 20; ++k) {
+            const double t = k / 20.0;
+            const double x = s.startPos.x + (s.endPos.x - s.startPos.x) * t;
+            const double y = s.startPos.y + (s.endPos.y - s.startPos.y) * t;
+            if (islandDistance(x, y) < 1.0) crossesIsland = true;
+        }
+    }
+    require(crossesIsland, "Ohne Insel-Block muss die ganze Tasche ausgeräumt werden");
+
+    // ── Z für alle Segmente: Segmenttiefen werden ignoriert ──
+    CAM::ConversationalBlock profile(12, CAM::BlockType::Contour, QStringLiteral("Kontur"));
+    profile.segments = rectSegs(0.0, 0.0, 40.0, 20.0);
+    profile.segments[2].z = -6.0; // abweichende Segmenttiefe
+    profile.startZ = 0.0;
+    profile.targetZ = -3.0;
+    profile.stepDown = 3.0;
+    profile.contourSide = CAM::ContourSide::OnLine;
+    auto deepest = [&](const CAM::ConversationalBlock& b) {
+        double z = 0.0;
+        for (const auto& s : b.generateToolpath(tools.first(), tools.first(), stock).segments) z = std::min(z, s.endPos.z);
+        return z;
+    };
+    profile.contourZForAll = false;
+    require(deepest(profile) < -5.9, "Z je Segment: abweichende Tiefe fehlt");
+    profile.contourZForAll = true;
+    require(std::abs(deepest(profile) + 3.0) < 1e-6, "Z für alle Segmente: nur Z UNTEN von Segment 0 erwartet");
+    const auto roleReloaded = CAM::ConversationalBlock::fromJson(pocket.toJson());
+    require(roleReloaded.contourRole == CAM::ContourRole::Pocket && roleReloaded.contourZForAll, "Konturart nicht gespeichert");
+
+    std::cout << " -> PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "=== Running CAM & Collision Test Suite ===" << std::endl;
     testToolpathGenerationFacing();
@@ -944,6 +1157,7 @@ int main() {
     testGCodeExportArcsCyclesOffsets();
     testContourArcsAndSegmentDepth();
     testToolMarksAndShading();
+    testHurcoDrillingAndContourRoles();
     std::cout << "=== All CAM Tests PASSED ===" << std::endl;
     return 0;
 }

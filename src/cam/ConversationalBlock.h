@@ -22,7 +22,8 @@ enum class BlockType {
     Stl3D,       // 3D-STL Freiformflächen-Fräsen
     RawNC,       // Direkter G-Code / Klipper Makros
     PatternStart,// Muster Start: wiederholt alle folgenden Blöcke bis Muster Ende
-    PatternEnd   // Muster Ende: schließt das zuletzt geöffnete Muster
+    PatternEnd,  // Muster Ende: schließt das zuletzt geöffnete Muster
+    DrillPositions // Bohrpositionen: Lage der Bohrungen für den vorangehenden Bohrungen-Block (Hurco)
 };
 
 enum class PatternType {
@@ -56,6 +57,69 @@ enum class DrillPattern {
     Arc,         // Bogenreihe (Kreisbogen mit Start-/Endwinkel)
     Frame,       // Rahmen-Muster (Umfang eines Rechtecks)
     Manual       // Manuelle Positionen (freie XY-Eingabe)
+};
+
+/**
+ * @brief Bohrvorgang im Bohrungen-Block (Hurco WinMax: Bohren (Zyklen), Gewindebohren, Ausdrehen und Reiben).
+ */
+enum class DrillOperationType {
+    Drill = 0,       // Bohrer
+    CenterDrill,     // Zentrieren (Zentrierbohrer 60°)
+    SpotFace,        // Flachsenken
+    NcSpotDrill,     // NC-Anbohren (90°)
+    Countersink,     // Kegelsenken (90°)
+    PeckDrill,       // Tieflochbohrer
+    CustomDrill,     // Benutzerdefiniertes Bohren
+    Tap,             // Gewindebohrer (Ausgleichsfutter)
+    RigidTap,        // Synchron-Gewindebohren
+    Bore,            // Ausdrehen
+    Ream             // Reiben
+};
+
+QString drillOperationName(DrillOperationType type);
+
+// Bohr-Typ der Bohrzyklen (Hurco: STANDARD / VERWEILZEIT / SPANBRUCH / TIEFLOCH)
+enum class DrillCycleType {
+    Standard = 0,    // G81
+    Dwell,           // G82 mit Verweilzeit
+    ChipBreak,       // G73 Spanbruch (kurzer Rückzug)
+    DeepHole         // G83 Tiefloch (Rückzug zur R-Ebene)
+};
+
+struct DrillOperation {
+    DrillOperationType type{DrillOperationType::Drill};
+    int toolId{1};
+    double spindleRpm{1000.0};
+    double plungeFeed{100.0};                   // Eintauchvorschub (mm/min)
+    DrillCycleType cycleType{DrillCycleType::Standard};
+    double peckDepth{0.0};                       // Stufentiefe (mm, 0 = ohne Stufen)
+    double retractDistance{0.5};                 // Rückzugsabstand beim Spanbruch (mm)
+    double dwellSec{0.0};                        // Verweilzeit am Grund (s)
+    double diameter{0.0};                        // Senk-/Anbohrdurchmesser (Zentrieren, NC-Anbohren, Kegelsenken)
+    double tipAngleDeg{90.0};                    // Spitzenwinkel des Werkzeugs
+    bool ownDepth{false};                        // eigene Tiefe statt Z UNTEN des Blocks
+    double depthZ{-1.0};                         // eigene Z UNTEN (Flachsenken oder ownDepth)
+    double threadPitch{1.0};                     // Gewindesteigung (mm)
+    bool boreSpindleStop{false};                 // Ausdrehen: Spindel halt + Eilgang zurück (G86) statt Vorschub (G85)
+
+    [[nodiscard]] bool usesDrillCycleType() const;
+    [[nodiscard]] bool usesDiameter() const;     // Tiefe ergibt sich aus Durchmesser und Spitzenwinkel
+    [[nodiscard]] bool isTapping() const { return type == DrillOperationType::Tap || type == DrillOperationType::RigidTap; }
+    // Endtiefe dieses Bohrvorgangs bei gegebener Z START / Z UNTEN des Blocks
+    [[nodiscard]] double bottomZ(double blockStartZ, double blockBottomZ) const;
+    [[nodiscard]] int cycleCode() const;         // PathSegment::drillCycle (0 G81/G82, 1 G83, 2 G73, 3 G84, 4 G85, 5 G86)
+    [[nodiscard]] double effectiveFeed() const;  // Gewinde: Drehzahl × Steigung
+
+    [[nodiscard]] QJsonObject toJson() const;
+    [[nodiscard]] static DrillOperation fromJson(const QJsonObject& json);
+    [[nodiscard]] static DrillOperation createDefault(DrillOperationType type, int toolId);
+};
+
+// Bedeutung einer gezeichneten Kontur (Hurco: Kontur, Tasche, Insel)
+enum class ContourRole {
+    Profile = 0,  // Fräsbahn entlang der Kontur (auf / innen / außen)
+    Pocket = 1,   // Taschengrenze: Innenraum ausräumen
+    Island = 2    // Insel der vorangehenden Tasche (bleibt stehen)
 };
 
 enum class MillingType {
@@ -124,6 +188,8 @@ public:
 
     // ═══ Kontur ═══
     ContourSide contourSide{ContourSide::Outside};
+    ContourRole contourRole{ContourRole::Profile};
+    bool contourZForAll{false};  // Z UNTEN von Segment 0 gilt für alle Segmente (neue Blöcke: ja; ältere Dateien: Z je Segment)
     double finishAllowance{0.2}; // Schlichtaufmaß (mm)
     double leadRadius{2.0};      // An-/Abfahrt-Radius (mm)
     int leadType{1};             // 0 = Direkt, 1 = Tangentialbogen, 2 = Senkrecht
@@ -170,7 +236,11 @@ public:
 
     // ═══ Bohren ═══
     DrillPattern drillPattern{DrillPattern::BoltCircle};
-    int drillCycle{0};           // 0 = Einfach (G81), 1 = Spanbruch (G83), 2 = Tiefloch (G73), 3 = Gewinde (G84), 4 = Ausbohren (G85), 5 = Ausspindeln (G86)
+    // Bohrvorgänge in Reihenfolge (Hurco-Datensatz). Leer = älterer Einzelzyklus aus drillCycle/peckDepth/dwellTimeSec
+    std::vector<DrillOperation> drillOps;
+    // Bohrpositionen aus den folgenden Bohrpositionen-Blöcken (vom Programm vor der Berechnung gesetzt, nicht gespeichert)
+    std::vector<std::pair<double, double>> resolvedDrillPositions;
+    int drillCycle{0};           // älterer Einzelzyklus: 0 = G81, 1 = Tiefloch (G83), 2 = Spanbruch (G73), 3 = Gewinde (G84), 4 = Ausbohren (G85), 5 = Ausspindeln (G86)
     double peckDepth{2.0};       // Q-Tiefe für Spanbruch (mm)
     double dwellTimeSec{0.5};    // P-Verweilzeit am Grund (s)
     double boltCircleRadius{25.0};
@@ -227,6 +297,12 @@ public:
     bool patternMirrorX{true};        // Spiegeln an senkrechter Achse (X → -X)
     bool patternMirrorY{false};       // Spiegeln an waagrechter Achse (Y → -Y)
 
+    // Bohrungen-Block aus einem älteren Einzelzyklus in Hurco-Bohrvorgänge umwandeln
+    void convertLegacyDrillCycle();
+
+    // Bohrpositionen dieses Bohrpositionen-Blocks (bzw. eines älteren Bohrblocks mit eigenem Muster)
+    [[nodiscard]] std::vector<Core::Vector3D> calculateDrillPositions() const;
+
     [[nodiscard]] bool isPatternBlock() const {
         return type == BlockType::PatternStart || type == BlockType::PatternEnd;
     }
@@ -240,13 +316,12 @@ public:
     [[nodiscard]] Toolpath generateToolpath(const Core::ToolDefinition& tool,
                                             const Core::ToolDefinition& finishTool,
                                             const Core::BoundingBox& stockBounds,
-                                            const Geometry::Mesh& partMesh = Geometry::Mesh()) const;
+                                            const Geometry::Mesh& partMesh = Geometry::Mesh(),
+                                            const QList<Core::ToolDefinition>& toolLibrary = {}) const;
 
     [[nodiscard]] QJsonObject toJson() const;
     [[nodiscard]] static ConversationalBlock fromJson(const QJsonObject& json);
 
-private:
-    [[nodiscard]] std::vector<Core::Vector3D> calculateDrillPositions() const;
 };
 
 } // namespace GeminiCNC::CAM

@@ -41,6 +41,8 @@ public:
     // Werkzeugauswahl aus der Bibliothek und Technologie des Blocks (Werkzeug, Fräsart, Schnittwerte)
     void setToolLibrary(const QList<Core::ToolDefinition>& tools);
     void setTechnology(int toolId, int contourSide, double feed, double plunge, double rpm, double stepDown);
+    // Konturart (0 = Kontur, 1 = Tasche, 2 = Insel) und ob Z UNTEN von Segment 0 für alle Segmente gilt
+    void setContourOptions(int role, bool zForAll);
 
     // Navigation & Softkey-Aktionen (F1..F8)
     void navigateNext();
@@ -59,6 +61,7 @@ signals:
     void accepted();
     // contourSide: 0 = Außen, 1 = Innen, 2 = Auf Kontur (CAM::ContourSide)
     void technologyChanged(int toolId, int contourSide, double feed, double plunge, double rpm, double stepDown);
+    void contourOptionsChanged(int role, bool zForAll);
 
 private slots:
     void onInputEdited();
@@ -75,6 +78,15 @@ private:
     void updateContextPrompt();
     [[nodiscard]] bool isArcStep(int index) const;
     void applyArcSolution();
+    void applyContourOptions();          // Bedienereingabe Konturart / Z für alle übernehmen
+    void updateDepthFieldVisibility();   // nur die nötigen Tiefenfelder abfragen
+    [[nodiscard]] bool perSegmentDepth() const { return m_contourRole == 0 && !m_zForAll; }
+
+    int m_contourRole{0};
+    bool m_zForAll{false};
+    QComboBox* m_cmbContourRole{nullptr};
+    QComboBox* m_cmbZForAll{nullptr};
+    QFormLayout* m_roughForm{nullptr};
 
     bool m_isSyncingTechnology{false};
     QFormLayout* m_arcForm{nullptr};

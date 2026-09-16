@@ -23,6 +23,14 @@ public:
     bool moveBlockUp(size_t index);
     bool moveBlockDown(size_t index);
     void duplicateBlock(size_t index);
+    [[nodiscard]] int nextBlockId() const;
+
+    // Block mit den Daten der zugehörigen Folgeblöcke (Bohrpositionen, Inseln) für die Berechnung
+    [[nodiscard]] ConversationalBlock resolvedBlock(size_t index) const;
+
+    // Ältere Bohrblöcke (ein Zyklus + eigenes Bohrbild) in Bohrungen + Bohrpositionen aufteilen
+    bool upgradeDrillBlock(size_t index);
+    void upgradeLegacyDrillBlocks();
 
     [[nodiscard]] size_t size() const { return blocks.size(); }
     [[nodiscard]] bool empty() const { return blocks.empty(); }
