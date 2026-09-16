@@ -471,6 +471,63 @@ void testContourArcsAndSegmentDepth() {
     std::cout << " -> PASSED" << std::endl;
 }
 
+void testToolMarksAndShading() {
+    std::cout << "[TEST] Darstellung: Fräserspuren und Umgebungsverdeckung..." << std::endl;
+    const Core::BoundingBox bounds({0, 0, -10}, {60, 40, 0});
+    Simulation::StockModel stock(bounds);
+    const double dx = bounds.widthX() / (stock.resX - 1);
+    const double dy = bounds.depthY() / (stock.resY - 1);
+    auto indexAt = [&](double x, double y) {
+        const long i = std::lround(x / dx);
+        const long j = std::lround(y / dy);
+        return static_cast<size_t>(j) * stock.resX + static_cast<size_t>(i);
+    };
+
+    // Nut in X-Richtung, 5 mm tief, Fräser-Radius 5, Vorschub 0,4 mm/U
+    stock.carveSegment({10, 20, -3}, {50, 20, -3}, 5.0, QColor(255, 230, 20), 1, 0.4);
+    const size_t inside = indexAt(30.0, 22.0);
+    const auto& mark = stock.marks[inside];
+    const double px = std::lround(30.0 / dx) * dx;
+    const double py = std::lround(22.0 / dy) * dy;
+    require(mark.kind == 1, "Fräserspur in der Nut fehlt");
+    require(std::abs(mark.dirX - 1.0f) < 1e-6 && std::abs(mark.dirY) < 1e-6, "Vorschubrichtung der Spur falsch");
+    require(std::abs(mark.u - px) < 1e-3 && std::abs(mark.d - (py - 20.0)) < 1e-3, "Spurkoordinaten falsch");
+    require(std::abs(mark.radius - 5.0f) < 1e-6 && std::abs(mark.pitch - 0.4f) < 1e-6, "Spur: Radius oder Vorschub falsch");
+    require(stock.marks[indexAt(30.0, 35.0)].kind == 0, "Ungefräste Fläche darf keine Spur haben");
+
+    // Schlichtgang auf gleicher Tiefe quer dazu: Spur wird ohne weiteren Abtrag überschrieben
+    stock.carveSegment({30, 12, -3}, {30, 28, -3}, 3.0, QColor(255, 230, 20), 2, 0.2);
+    require(stock.marks[inside].kind == 2 && std::abs(stock.marks[inside].dirY - 1.0f) < 1e-6,
+            "Schlichtgang muss die Spur überschreiben");
+
+    // Eintauchen: Ringspur
+    stock.carveSegment({15, 8, -2}, {15, 8, -2}, 2.0, QColor(255, 230, 20), 1, 0.3);
+    require(stock.marks[indexAt(15.0, 8.0)].kind == 3, "Eintauchen muss eine Ringspur erzeugen");
+
+    const auto surface = stock.buildSurface();
+    require(surface.shading.size() == surface.vertices.size(), "Darstellungsdaten passen nicht zur Oberfläche");
+
+    float floorNearWallAo = 1.0f;
+    float openTopAo = 0.0f;
+    bool cutVertexFound = false;
+    for (size_t k = 0; k < surface.vertices.size(); ++k) {
+        const auto& v = surface.vertices[k];
+        const auto& sh = surface.shading[k];
+        if (std::abs(v.z + 3.0f) < 1e-4f && std::abs(v.x - 45.0f) < 1.0f && std::abs(v.y - 24.5f) < 0.3f && v.nz > 0.5f) {
+            floorNearWallAo = std::min(floorNearWallAo, sh.ao);
+            cutVertexFound = cutVertexFound || sh.kind > 0.5f;
+        }
+        if (std::abs(v.z) < 1e-4f && v.x < 3.0f && v.y > 36.0f && v.nz > 0.5f) {
+            openTopAo = std::max(openTopAo, sh.ao);
+        }
+    }
+    require(cutVertexFound, "Oberfläche trägt die Fräserspur nicht");
+    require(floorNearWallAo < 0.95f, "Umgebungsverdeckung am Wandfuß fehlt");
+    require(openTopAo > 0.98f, "Offene Oberfläche darf nicht verdeckt sein");
+
+    std::cout << " -> PASSED (Verdeckung Wandfuß " << floorNearWallAo << ")" << std::endl;
+}
+
 void testBlockSerializationComplete() {
     std::cout << "[TEST] Programm speichern: alle Blockparameter bleiben erhalten..." << std::endl;
     CAM::ConversationalBlock b(7, CAM::BlockType::Pocket, QStringLiteral("Tasche komplett"));
@@ -886,6 +943,7 @@ int main() {
     testMachiningOptionsAffectToolpath();
     testGCodeExportArcsCyclesOffsets();
     testContourArcsAndSegmentDepth();
+    testToolMarksAndShading();
     std::cout << "=== All CAM Tests PASSED ===" << std::endl;
     return 0;
 }

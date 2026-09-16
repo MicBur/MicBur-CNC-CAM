@@ -203,6 +203,10 @@ void SimulationWindow::setToolpath(const CAM::Toolpath& toolpath) {
     m_viewport->setToolpath(toolpath);
 }
 
+void SimulationWindow::setRenderQuality(int quality) {
+    m_viewport->setRenderQuality(quality);
+}
+
 void SimulationWindow::setMaterialPreset(int preset) {
     m_viewport->setMaterialPreset(preset);
 }

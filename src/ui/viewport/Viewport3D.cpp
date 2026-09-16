@@ -4,6 +4,31 @@
 
 namespace GeminiCNC::UI {
 
+namespace {
+
+// Physikalische Materialwerte: gefräste Fläche und Rohteiloberfläche
+struct MaterialLook {
+    QVector3D cutColor;
+    float cutMetallic;
+    float cutRoughness;
+    QVector3D rawColor;
+    float rawMetallic;
+    float rawRoughness;
+};
+
+MaterialLook materialLook(int preset) {
+    switch (preset) {
+        case 1:  return {{0.95f, 0.80f, 0.45f}, 1.0f, 0.25f, {0.72f, 0.58f, 0.32f}, 1.0f, 0.50f};  // Messing
+        case 2:  return {{0.62f, 0.63f, 0.64f}, 1.0f, 0.28f, {0.22f, 0.23f, 0.25f}, 0.45f, 0.70f}; // Stahl mit Walzhaut
+        case 3:  return {{0.55f, 0.38f, 0.22f}, 0.0f, 0.75f, {0.47f, 0.32f, 0.19f}, 0.0f, 0.85f};  // Holz
+        case 4:  return {{0.92f, 0.92f, 0.90f}, 0.0f, 0.45f, {0.88f, 0.88f, 0.86f}, 0.0f, 0.55f};  // POM
+        case 5:  return {{0.72f, 0.70f, 0.67f}, 1.0f, 0.20f, {0.55f, 0.55f, 0.56f}, 1.0f, 0.42f};  // Edelstahl
+        default: return {{0.91f, 0.92f, 0.92f}, 1.0f, 0.22f, {0.76f, 0.77f, 0.78f}, 1.0f, 0.45f};  // Aluminium
+    }
+}
+
+} // namespace
+
 Viewport3D::Viewport3D(QWidget* parent) : QOpenGLWidget(parent) {
     setFocusPolicy(Qt::StrongFocus);
     m_activeTool = Core::ToolDefinition(1, QStringLiteral("6mm Fräser"), Core::ToolType::EndMill, 6.0);
@@ -11,6 +36,8 @@ Viewport3D::Viewport3D(QWidget* parent) : QOpenGLWidget(parent) {
 
 Viewport3D::~Viewport3D() {
     makeCurrent();
+    m_gpuStockModel.reset(); // GL-Objekte bei aktivem Kontext freigeben
+    m_hybridShader.reset();
     m_shader.reset();
     doneCurrent();
 }
@@ -132,6 +159,24 @@ void Viewport3D::resizeGL(int w, int h) {
 }
 
 void Viewport3D::paintGL() {
+    // Dynamisches Rohteil vor dem Zeichnen aktualisieren (auch für den Schattendurchlauf)
+    if (m_showStock && m_useDynamicStock && m_dynamicStockDirty && m_dynamicStockSource) {
+        if (!m_gpuStockModel) m_gpuStockModel = std::make_unique<GPUStockModel>();
+        if (!m_gpuStockModel->isInitialized()) m_gpuStockModel->initializeGL();
+        m_gpuStockModel->updateFromCPU(*m_dynamicStockSource);
+        m_dynamicStockDirty = false;
+        m_shadowDirty = true;
+    }
+
+    // Schattenkarte des Hauptlichts nur neu zeichnen, wenn sich das Werkstück geändert hat
+    const QVector3D keyLightDir = QVector3D(0.4f, 0.6f, 1.0f).normalized();
+    if (m_renderQuality >= 2 && m_showStock && m_useDynamicStock && m_gpuStockModel && m_gpuStockModel->isInitialized()) {
+        if (m_gpuStockModel->initShadowMap(2048) && m_shadowDirty) {
+            m_gpuStockModel->renderShadowPass(m_gpuStockModel->lightSpaceMatrix(keyLightDir), defaultFramebufferObject());
+            m_shadowDirty = false;
+        }
+    }
+
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     // View-Matrix aufbauen (CNC-Konvention: Z nach oben, Blick von schräg oben)
@@ -174,12 +219,6 @@ void Viewport3D::paintGL() {
             default: stockColor = QColor(200, 205, 215); spec = 0.7f; shin = 64.0f; break; // Default
         }
 
-        if (m_useDynamicStock && m_dynamicStockDirty && m_dynamicStockSource) {
-            if (!m_gpuStockModel) m_gpuStockModel = std::make_unique<GPUStockModel>();
-            if (!m_gpuStockModel->isInitialized()) m_gpuStockModel->initializeGL();
-            m_gpuStockModel->updateFromCPU(*m_dynamicStockSource);
-            m_dynamicStockDirty = false;
-        }
 
         if (m_useDynamicStock && m_gpuStockModel && m_gpuStockModel->isInitialized() && m_hybridShader) {
             m_hybridShader->bind();
@@ -189,6 +228,20 @@ void Viewport3D::paintGL() {
             m_hybridShader->setMatrices(model, m_viewMatrix, m_projectionMatrix);
             m_hybridShader->setColor(stockColor);
             m_hybridShader->setSpecular(spec, shin);
+
+            // Realistisches Material (PBR) und Fräserspuren; Schatten nur mit gültiger Schattenkarte
+            const MaterialLook look = materialLook(m_materialPreset);
+            auto& stockProgram = m_hybridShader->program();
+            const int quality = (m_renderQuality >= 2 && !m_gpuStockModel->hasShadowMap()) ? 1 : m_renderQuality;
+            stockProgram.setUniformValue("uQuality", quality);
+            stockProgram.setUniformValue("uCutColor", look.cutColor);
+            stockProgram.setUniformValue("uCutMetallic", look.cutMetallic);
+            stockProgram.setUniformValue("uCutRoughness", look.cutRoughness);
+            stockProgram.setUniformValue("uRawColor", look.rawColor);
+            stockProgram.setUniformValue("uRawMetallic", look.rawMetallic);
+            stockProgram.setUniformValue("uRawRoughness", look.rawRoughness);
+            stockProgram.setUniformValue("uLightSpace", m_gpuStockModel->lightSpaceMatrix(keyLightDir));
+            m_gpuStockModel->bindShadowTexture(1);
             
             m_gpuStockModel->render(&m_hybridShader->program(), m_renderMode);
             

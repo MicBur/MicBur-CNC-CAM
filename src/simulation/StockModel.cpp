@@ -64,6 +64,7 @@ void StockModel::reset() {
     layerLo = m_initialLo;
     layerHi = m_initialHi;
     cutColors.assign(n, 0);
+    marks.assign(n, ToolMark{});
     heightField.assign(n, floorZ());
     for (size_t i = 0; i < n; ++i) {
         updateTop(i);
@@ -230,11 +231,15 @@ void StockModel::carveCylinder(const Core::Vector3D& toolCenter, double radius, 
     carveSegment(toolCenter, toolCenter, radius, toolColor);
 }
 
-void StockModel::carveSegment(const Core::Vector3D& p0, const Core::Vector3D& p1, double radius, const QColor& toolColor) {
+void StockModel::carveSegment(const Core::Vector3D& p0, const Core::Vector3D& p1, double radius,
+                              const QColor& toolColor, int markKind, double markPitch) {
     const size_t n = static_cast<size_t>(resX) * resY;
     if (!bounds.isValid() || layerCount.size() != n) return;
     if (cutColors.size() != n) {
         cutColors.assign(n, 0);
+    }
+    if (marks.size() != n) {
+        marks.assign(n, ToolMark{});
     }
 
     const double dx = bounds.widthX() / (resX - 1);
@@ -297,6 +302,31 @@ void StockModel::carveSegment(const Core::Vector3D& p0, const Core::Vector3D& p1
                 updateTop(idx);
                 cutColors[idx] = colorRgba;
             }
+
+            // Bearbeitungsspur merken: bei Abtrag oder wenn der Fräser die Fläche nur überstreicht (Schlichten)
+            const bool touches = count > 0 && layerHi[idx * kMaxLayers + count - 1] >= cutZf - 0.02f;
+            if (changed || touches) {
+                ToolMark& mark = marks[idx];
+                if (segLenSq > 1e-8) {
+                    const double segLen = std::sqrt(segLenSq);
+                    const double dirX = segDx / segLen;
+                    const double dirY = segDy / segLen;
+                    mark.dirX = static_cast<float>(dirX);
+                    mark.dirY = static_cast<float>(dirY);
+                    mark.u = static_cast<float>(px * dirX + py * dirY);
+                    mark.d = static_cast<float>(-(px - p0.x) * dirY + (py - p0.y) * dirX);
+                    mark.kind = static_cast<uint8_t>(std::clamp(markKind, 1, 3));
+                } else {
+                    // Senkrechtes Eintauchen: konzentrische Ringe um die Werkzeugmitte
+                    mark.dirX = 1.0f;
+                    mark.dirY = 0.0f;
+                    mark.u = static_cast<float>(std::hypot(px - p0.x, py - p0.y));
+                    mark.d = 0.0f;
+                    mark.kind = 3;
+                }
+                mark.radius = static_cast<float>(radius);
+                mark.pitch = static_cast<float>(markPitch);
+            }
         }
     }
 }
@@ -336,6 +366,43 @@ StockModel::Surface StockModel::buildSurface() const {
         nx /= len; ny /= len; nz /= len;
     };
 
+    // Umgebungsverdeckung (Taschen, Ecken, Wandfüße) aus dem Höhenfeld und Bearbeitungsspur je Punkt
+    const float cell = static_cast<float>(std::min(dx, dy));
+    auto shadingAt = [&](int i, int j, int k) {
+        VertexShading sh;
+        const size_t p = static_cast<size_t>(j) * resX + i;
+        if (k != layerCount[p] - 1) return sh; // untere Schichten: ungefräst, unverdeckt
+
+        static constexpr int dirs[8][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+        static constexpr int steps[4] = {1, 2, 4, 8};
+        const float z = hi(i, j, k);
+        float occlusion = 0.0f;
+        for (const auto& dir : dirs) {
+            const float stepLen = cell * ((dir[0] != 0 && dir[1] != 0) ? 1.4142f : 1.0f);
+            float maxSlope = 0.0f;
+            for (int st : steps) {
+                const int ii = i + dir[0] * st;
+                const int jj = j + dir[1] * st;
+                if (ii < 0 || jj < 0 || ii >= resX || jj >= resY) break;
+                maxSlope = std::max(maxSlope, (heightField[static_cast<size_t>(jj) * resX + ii] - z) / (stepLen * st));
+            }
+            occlusion += maxSlope / (1.0f + maxSlope);
+        }
+        sh.ao = std::clamp(1.0f - 0.9f * occlusion / 8.0f, 0.3f, 1.0f);
+
+        if (p < marks.size() && marks[p].kind > 0) {
+            const ToolMark& m = marks[p];
+            sh.markU = m.u;
+            sh.markD = m.d;
+            sh.markRadius = m.radius;
+            sh.markPitch = m.pitch;
+            sh.dirX = m.dirX;
+            sh.dirY = m.dirY;
+            sh.kind = static_cast<float>(m.kind);
+        }
+        return sh;
+    };
+
     std::vector<uint32_t> topIdx(n * L, kNoVertex);
     std::vector<uint32_t> botIdx(n * L, kNoVertex);
 
@@ -356,6 +423,7 @@ StockModel::Surface StockModel::buildSurface() const {
             }
             slot = static_cast<uint32_t>(s.vertices.size());
             s.vertices.push_back({px(i), py(j), hi(i, j, k), nx, ny, nz, r, g, b, a});
+            s.shading.push_back(shadingAt(i, j, k));
         }
         return slot;
     };
@@ -367,6 +435,7 @@ StockModel::Surface StockModel::buildSurface() const {
             surfaceNormal(i, j, k, false, nx, ny, nz);
             slot = static_cast<uint32_t>(s.vertices.size());
             s.vertices.push_back({px(i), py(j), lo(i, j, k), nx, ny, nz, botR, botG, botB, botA});
+            s.shading.push_back(VertexShading{});
         }
         return slot;
     };
@@ -387,6 +456,18 @@ StockModel::Surface StockModel::buildSurface() const {
         s.vertices.push_back({px(ib), py(jb), bb, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
         s.vertices.push_back({px(ib), py(jb), tb, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
         s.vertices.push_back({px(ia), py(ja), ta, nx, ny, 0.0f, sideR, sideG, sideB, sideA});
+
+        // Wandfuß stärker verdeckt als die Oberkante; Spuren wie am angrenzenden Punkt
+        const VertexShading shA = shadingAt(ia, ja, k);
+        const VertexShading shB = shadingAt(ib, jb, k);
+        VertexShading shABottom = shA;
+        VertexShading shBBottom = shB;
+        shABottom.ao *= 0.45f;
+        shBBottom.ao *= 0.45f;
+        s.shading.push_back(shABottom);
+        s.shading.push_back(shBBottom);
+        s.shading.push_back(shB);
+        s.shading.push_back(shA);
 
         // Umlaufsinn so wählen, dass die Dreiecksnormale nach außen zeigt
         const float ex = px(ib) - px(ia);

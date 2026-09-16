@@ -248,6 +248,26 @@ void MainWindow::setupToolbar() {
         });
     }
 
+    // 6b. Darstellungsqualität: Schnell / Realistisch / Realistisch + Schatten
+    {
+        static const QStringList qualityNames = {
+            QStringLiteral("Schnell"), QStringLiteral("Realistisch"), QStringLiteral("Realistisch + Schatten")
+        };
+        auto* actQuality = tb->addAction(QStringLiteral("✨ Realistisch + Schatten"));
+        actQuality->setToolTip(QStringLiteral("Werkstück-Darstellung umschalten: Schnell (einfach), "
+                                              "Realistisch (Metall, Fräserspuren), Realistisch + Schatten"));
+        connect(actQuality, &QAction::triggered, this, [this, actQuality]() {
+            static int quality = 2;
+            quality = (quality + 1) % qualityNames.size();
+            m_viewport->setRenderQuality(quality);
+            m_simWindow->setRenderQuality(quality);
+            actQuality->setText(QString("✨ %1").arg(qualityNames[quality]));
+            if (m_lblContextPrompt) {
+                m_lblContextPrompt->setText(QString("Darstellung: %1").arg(qualityNames[quality]));
+            }
+        });
+    }
+
     tb->addSeparator();
 
     // 7. Separates Simulationsfenster öffnen

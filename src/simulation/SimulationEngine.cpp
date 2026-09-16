@@ -4,6 +4,22 @@
 
 namespace GeminiCNC::Simulation {
 
+namespace {
+
+// Art der Fräserspur für die Darstellung
+int markKindFor(const Core::ToolDefinition& tool) {
+    if (tool.type == Core::ToolType::BallMill) return 2;
+    if (tool.type == Core::ToolType::Drill) return 3;
+    return 1;
+}
+
+// Vorschub je Umdrehung (mm) bestimmt den Abstand der Fräserspuren
+double markPitchFor(const CAM::PathSegment& seg) {
+    return seg.spindleRpm > 1.0 ? seg.feedRate / seg.spindleRpm : 0.1;
+}
+
+} // namespace
+
 QString simStateToString(SimState state) {
     switch (state) {
         case SimState::Idle: return QStringLiteral("Bereit");
@@ -143,7 +159,7 @@ void SimulationEngine::stepForward() {
     if (seg.motion != CAM::MotionType::Rapid) {
         QColor toolColor = m_activeTool.color.isEmpty() ? QColor(255, 230, 20) : QColor(m_activeTool.color);
         double carveDia = (seg.toolDiameter > 0.5) ? seg.toolDiameter : m_activeTool.diameter;
-        m_stockModel.carveSegment(seg.startPos, seg.endPos, carveDia * 0.5, toolColor);
+        m_stockModel.carveSegment(seg.startPos, seg.endPos, carveDia * 0.5, toolColor, markKindFor(m_activeTool), markPitchFor(seg));
         emit stockUpdated();
     }
     m_lastCarvePos = m_currentPos;
@@ -250,7 +266,7 @@ void SimulationEngine::updateSegmentMovement(double dtSec) {
             // Segment vollendet
             m_currentPos = curSeg.endPos;
             if (curSeg.motion != CAM::MotionType::Rapid) {
-                m_stockModel.carveSegment(prevPos, m_currentPos, carveDia * 0.5, toolColor);
+                m_stockModel.carveSegment(prevPos, m_currentPos, carveDia * 0.5, toolColor, markKindFor(m_activeTool), markPitchFor(curSeg));
                 didCarve = true;
             }
             remainingDist -= segRemaining;
@@ -261,7 +277,7 @@ void SimulationEngine::updateSegmentMovement(double dtSec) {
             m_segmentProgress += remainingDist / curLen;
             m_currentPos = Core::Vector3D::lerp(curSeg.startPos, curSeg.endPos, m_segmentProgress);
             if (curSeg.motion != CAM::MotionType::Rapid) {
-                m_stockModel.carveSegment(prevPos, m_currentPos, carveDia * 0.5, toolColor);
+                m_stockModel.carveSegment(prevPos, m_currentPos, carveDia * 0.5, toolColor, markKindFor(m_activeTool), markPitchFor(curSeg));
                 didCarve = true;
             }
             remainingDist = 0.0;

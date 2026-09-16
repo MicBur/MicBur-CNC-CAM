@@ -53,6 +53,14 @@ public:
     void setShowGrid(bool show) { m_showGrid = show; update(); }
     void setMaterialPreset(int preset) { m_materialPreset = preset; update(); }
 
+    // Darstellung des Werkstücks: 0 = Schnell, 1 = Realistisch (Metall, Fräserspuren), 2 = Realistisch + Schatten
+    void setRenderQuality(int quality) {
+        m_renderQuality = quality < 0 ? 0 : (quality > 2 ? 2 : quality);
+        m_shadowDirty = true;
+        update();
+    }
+    [[nodiscard]] int renderQuality() const { return m_renderQuality; }
+
     // Interaktive DXF-Konturauswahl (Picking)
     void setSelectableContours(const std::vector<Geometry::Contour>& contours);
     void setPickingEnabled(bool enable) { m_pickingEnabled = enable; update(); }
@@ -94,7 +102,9 @@ private:
     bool m_dynamicStockDirty{false};
     int m_renderMode{0}; // 0 = Realistic, 1 = Heatmap
     
-    int m_materialPreset{1}; // 1=Alu default
+    int m_materialPreset{0}; // 0 = Alu (Reihenfolge wie der Material-Knopf)
+    int m_renderQuality{2};  // Realistisch + Schatten
+    bool m_shadowDirty{true};
 
     std::vector<Geometry::Contour> m_selectableContours;
     int m_selectedContourIndex{-1};

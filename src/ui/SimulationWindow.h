@@ -32,6 +32,7 @@ public:
     void setTargetPartMesh(const Geometry::Mesh& mesh);
     void setToolpath(const CAM::Toolpath& toolpath);
     void setMaterialPreset(int preset);
+    void setRenderQuality(int quality);
 
     /// @brief Zugriff auf den eigenen Viewport (für Signal-Routing)
     [[nodiscard]] Viewport3D* viewport() const { return m_viewport; }

@@ -93,24 +93,40 @@ bool ShaderProgram::init() {
     return true;
 }
 
+// ═══════════════════════════════════════════════════════════
+// Rohteil-Shader: realistisches Metall (PBR), Fräserspuren, Schatten, Restmaterial-Heatmap
+// ═══════════════════════════════════════════════════════════
+
 static const char* hybridVertexShader = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in float aTargetZ;
+layout(location = 3) in float aAo;
+layout(location = 4) in vec4 aMark;     // u, d, Radius, Vorschub je Umdrehung
+layout(location = 5) in vec3 aMarkDir;  // Vorschubrichtung x/y, Spurart (0 = ungefräst)
 
 out vec3 v_FragPos;
 out vec3 v_Normal;
 out float v_TargetZ;
+out float v_Ao;
+out vec4 v_Mark;
+out vec3 v_MarkDir;
+out vec4 v_LightSpacePos;
 
 uniform mat4 uModel;
 uniform mat4 uView;
 uniform mat4 uProjection;
+uniform mat4 uLightSpace;
 
 void main() {
     v_FragPos = vec3(uModel * vec4(aPos, 1.0));
     v_Normal = mat3(transpose(inverse(uModel))) * aNormal;
     v_TargetZ = aTargetZ;
+    v_Ao = aAo;
+    v_Mark = aMark;
+    v_MarkDir = aMarkDir;
+    v_LightSpacePos = uLightSpace * vec4(v_FragPos, 1.0);
     gl_Position = uProjection * uView * vec4(v_FragPos, 1.0);
 }
 )";
@@ -120,49 +136,213 @@ static const char* hybridFragmentShader = R"(
 in vec3 v_FragPos;
 in vec3 v_Normal;
 in float v_TargetZ;
+in float v_Ao;
+in vec4 v_Mark;
+in vec3 v_MarkDir;
+in vec4 v_LightSpacePos;
 
 out vec4 FragColor;
 
-// Lighting Uniforms
+// Beleuchtung (Schnell-Modus)
 uniform vec3 uLightDir;
 uniform vec3 uViewPos;
 uniform vec4 uColor;
 uniform float uSpecularIntensity;
 uniform float uShininess;
 
-// Render Mode: 0 = Realistic, 1 = Restmaterial Heatmap
-uniform int u_RenderMode; 
+// Render Mode: 0 = Realistisch, 1 = Restmaterial-Heatmap
+uniform int u_RenderMode;
 
-void main() {
-    vec3 normal = normalize(v_Normal);
-    vec3 lightDir = normalize(uLightDir);
-    vec3 viewDir = normalize(uViewPos - v_FragPos);
-    
-    vec3 ambient = 0.40 * vec3(1.0);
-    
-    float diff = max(dot(normal, lightDir), 0.0);
-    vec3 diffuse = 0.60 * diff * vec3(1.0);
-    
-    vec3 halfwayDir = normalize(lightDir + viewDir);
-    float spec = pow(max(dot(normal, halfwayDir), 0.0), uShininess);
-    vec3 specular = uSpecularIntensity * spec * vec3(1.0);
-    
-    vec3 baseColor = uColor.rgb;
+// Qualität: 0 = Schnell (Blinn-Phong), 1 = Realistisch (PBR + Spuren), 2 = Realistisch + Schatten
+uniform int uQuality;
+uniform vec3 uCutColor;       // gefräste Fläche (bei Metallen Reflexionsfarbe F0)
+uniform float uCutMetallic;
+uniform float uCutRoughness;
+uniform vec3 uRawColor;       // Rohteiloberfläche (Walzhaut, Sägeschnitt)
+uniform float uRawMetallic;
+uniform float uRawRoughness;
+uniform sampler2DShadow uShadowMap;
 
-    if (u_RenderMode == 1) {
-        float diffZ = v_FragPos.z - v_TargetZ;
-        
-        if (diffZ > 0.05) {
-            baseColor = vec3(0.1, 0.4, 1.0);
-        } else if (diffZ < -0.05) {
-            baseColor = vec3(1.0, 0.1, 0.1);
-        } else {
-            baseColor = vec3(0.1, 0.9, 0.2);
+const float PI = 3.14159265;
+
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float valueNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+               mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+
+// Prozedurale Studio-Umgebung (Z nach oben): Boden, Horizont, Himmel und Softboxen.
+// Rauheit weitet die Lichtquellen auf (grobe Näherung einer vorgefilterten Umgebung).
+vec3 environment(vec3 dir, float rough) {
+    float up = clamp(dir.z * 0.5 + 0.5, 0.0, 1.0);
+    vec3 c = mix(vec3(0.05, 0.05, 0.06), vec3(0.35, 0.37, 0.40), smoothstep(0.2, 0.52, up));
+    c = mix(c, vec3(0.70, 0.74, 0.80), smoothstep(0.52, 1.0, up));
+    float spread = rough * rough * 0.9;
+    float key = smoothstep(0.90 - spread, 0.985, dot(dir, normalize(vec3(0.45, -0.55, 0.70))));
+    float fill = smoothstep(0.93 - spread, 0.99, dot(dir, normalize(vec3(-0.75, 0.35, 0.56))));
+    float strip = smoothstep(0.975 - spread * 0.5, 1.0, 1.0 - abs(dir.y)) * smoothstep(0.1, 0.5, dir.z);
+    float energy = 1.0 / (1.0 + 6.0 * spread);
+    return c + (vec3(5.0) * key + vec3(2.5) * fill + vec3(1.2) * strip) * energy;
+}
+
+float D_GGX(float NdotH, float a) {
+    float a2 = a * a;
+    float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+float G_Smith(float NdotV, float NdotL, float rough) {
+    float k = (rough + 1.0) * (rough + 1.0) / 8.0;
+    return (NdotV / (NdotV * (1.0 - k) + k)) * (NdotL / (NdotL * (1.0 - k) + k));
+}
+
+vec3 F_Schlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+}
+
+// Analytische Näherung der vorintegrierten Umgebungs-BRDF (Karis)
+vec2 envBRDFApprox(float NdotV, float rough) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 r = rough * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    return vec2(-1.04, 1.04) * a004 + r.zw;
+}
+
+// Fräserspuren als feine Riefen: Normale kippt entlang der Vorschubrichtung, Rauheit variiert.
+// Zu feine Spuren (weit weg) werden ausgeblendet, damit nichts flimmert.
+vec3 applyToolMarks(vec3 N, float cut, out float roughOffset) {
+    roughOffset = 0.0;
+    if (cut < 0.01) return N;
+
+    int kind = int(v_MarkDir.z + 0.5);
+    vec2 dir = v_MarkDir.xy;
+    float dirLen = length(dir);
+    dir = dirLen > 1e-4 ? dir / dirLen : vec2(1.0, 0.0);
+    float pitch = max(v_Mark.w, 0.25);
+
+    float phase;
+    if (kind >= 3) {
+        phase = v_Mark.x / pitch;                        // Eintauchen/Bohren: konzentrische Ringe
+    } else if (kind == 2) {
+        phase = v_Mark.x / pitch;                        // Kugelfräser: Riefen quer zur Bahn
+    } else {
+        float R = max(v_Mark.z, 0.1);
+        float d = clamp(v_Mark.y, -R, R);
+        float wall = 1.0 - smoothstep(0.35, 0.8, abs(N.z));
+        // Boden: Bogenspur der Schneide; steile Wände: gerade Riefen
+        phase = (v_Mark.x - sqrt(max(R * R - d * d, 0.0)) * (1.0 - wall)) / pitch;
+    }
+
+    float fade = clamp(1.0 - fwidth(phase) * 1.2, 0.0, 1.0) * clamp(cut, 0.0, 1.0);
+    float s = sin(phase * 2.0 * PI);
+    float c = cos(phase * 2.0 * PI);
+
+    vec3 T = vec3(dir, 0.0);
+    T -= N * dot(T, N);
+    float tLen = length(T);
+    if (tLen > 1e-4) {
+        N = normalize(N + (T / tLen) * c * 0.22 * fade);
+    }
+    roughOffset = (0.5 + 0.5 * s) * 0.15 * fade;
+    return N;
+}
+
+float shadowFactor(vec3 N, vec3 L) {
+    if (uQuality < 2) return 1.0;
+    vec3 proj = v_LightSpacePos.xyz / v_LightSpacePos.w * 0.5 + 0.5;
+    if (proj.z > 1.0) return 1.0;
+    float bias = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
+    vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));
+    float sum = 0.0;
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            sum += texture(uShadowMap, vec3(proj.xy + vec2(float(x), float(y)) * texel, proj.z - bias));
         }
     }
-    
-    vec3 result = (ambient + diffuse) * baseColor + specular;
-    FragColor = vec4(result, 1.0);
+    return sum / 9.0;
+}
+
+void main() {
+    vec3 N = normalize(v_Normal);
+    vec3 L = normalize(uLightDir);
+    vec3 V = normalize(uViewPos - v_FragPos);
+
+    // Schnell-Modus und Restmaterial-Heatmap: einfache Blinn-Phong-Beleuchtung
+    if (uQuality == 0 || u_RenderMode == 1) {
+        float diff = max(dot(N, L), 0.0);
+        vec3 halfwayDir = normalize(L + V);
+        float spec = pow(max(dot(N, halfwayDir), 0.0), uShininess);
+        vec3 baseColor = uColor.rgb;
+        if (u_RenderMode == 1) {
+            float diffZ = v_FragPos.z - v_TargetZ;
+            if (diffZ > 0.05) {
+                baseColor = vec3(0.1, 0.4, 1.0);
+            } else if (diffZ < -0.05) {
+                baseColor = vec3(1.0, 0.1, 0.1);
+            } else {
+                baseColor = vec3(0.1, 0.9, 0.2);
+            }
+        }
+        FragColor = vec4((0.40 + 0.60 * diff) * baseColor + uSpecularIntensity * spec * vec3(1.0), 1.0);
+        return;
+    }
+
+    float cut = clamp(v_MarkDir.z, 0.0, 1.0);
+    float roughOffset;
+    N = applyToolMarks(N, cut, roughOffset);
+
+    // Rohteiloberfläche leicht fleckig (Walzhaut / Sägeschnitt)
+    float mottle = valueNoise(v_FragPos.xy * 0.35) * 0.6 + valueNoise(v_FragPos.xy * 1.7) * 0.4;
+    vec3 rawAlbedo = uRawColor * (0.85 + 0.3 * mottle);
+    float rawRough = clamp(uRawRoughness + (mottle - 0.5) * 0.15, 0.05, 1.0);
+
+    vec3 albedo = mix(rawAlbedo, uCutColor, cut);
+    float metallic = mix(uRawMetallic, uCutMetallic, cut);
+    float rough = clamp(mix(rawRough, uCutRoughness, cut) + roughOffset, 0.04, 1.0);
+
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    vec3 diffuseColor = albedo * (1.0 - metallic);
+    float NdotV = max(dot(N, V), 1e-4);
+
+    // Direktes Licht: Hauptlicht (mit Schatten), Fülllicht, Kantenlicht
+    vec3 lightDirs[3] = vec3[3](L, normalize(vec3(-0.6, -0.35, 0.55)), normalize(vec3(0.0, 0.9, 0.35)));
+    float intensities[3] = float[3](2.6, 0.7, 0.5);
+    float shadow = shadowFactor(N, L);
+    vec3 direct = vec3(0.0);
+    for (int i = 0; i < 3; ++i) {
+        vec3 Li = lightDirs[i];
+        float NdotL = max(dot(N, Li), 0.0);
+        if (NdotL <= 0.0) continue;
+        vec3 H = normalize(V + Li);
+        float NdotH = max(dot(N, H), 0.0);
+        vec3 F = F_Schlick(max(dot(H, V), 0.0), F0);
+        vec3 specular = D_GGX(NdotH, rough * rough) * G_Smith(NdotV, NdotL, rough) * F / max(4.0 * NdotV * NdotL, 1e-4);
+        vec3 kd = (1.0 - F) * (1.0 - metallic);
+        float visibility = (i == 0) ? shadow : 1.0;
+        direct += (kd * diffuseColor / PI + specular) * intensities[i] * NdotL * visibility;
+    }
+
+    // Umgebungslicht: Spiegelung der Studio-Umgebung und diffuses Umgebungslicht, mit Verdeckung
+    vec3 R = reflect(-V, N);
+    vec2 brdf = envBRDFApprox(NdotV, rough);
+    vec3 specEnv = environment(R, rough) * (F0 * brdf.x + brdf.y);
+    vec3 diffEnv = environment(N, 1.0) * diffuseColor;
+    float ao = clamp(v_Ao, 0.0, 1.0);
+    vec3 ambient = (specEnv + diffEnv) * ao * mix(0.55, 1.0, shadow);
+
+    vec3 color = direct + ambient;
+
+    // Filmisches Tonemapping (ACES-Näherung) und Gammakorrektur
+    color = clamp((color * (2.51 * color + 0.03)) / (color * (2.43 * color + 0.59) + 0.14), 0.0, 1.0);
+    color = pow(color, vec3(1.0 / 2.2));
+    FragColor = vec4(color, 1.0);
 }
 )";
 
@@ -170,7 +350,7 @@ bool ShaderProgram::initHybrid() {
     if (!m_program.addShaderFromSourceCode(QOpenGLShader::Vertex, hybridVertexShader)) return false;
     if (!m_program.addShaderFromSourceCode(QOpenGLShader::Fragment, hybridFragmentShader)) return false;
     if (!m_program.link()) return false;
-    
+
     m_locModel = m_program.uniformLocation("uModel");
     m_locView = m_program.uniformLocation("uView");
     m_locProjection = m_program.uniformLocation("uProjection");
@@ -181,6 +361,11 @@ bool ShaderProgram::initHybrid() {
     m_locSpecularIntensity = m_program.uniformLocation("uSpecularIntensity");
     m_locShininess = m_program.uniformLocation("uShininess");
     m_locViewPos = m_program.uniformLocation("uViewPos");
+
+    // Schattenkarte liegt auf Textureinheit 1
+    m_program.bind();
+    m_program.setUniformValue("uShadowMap", 1);
+    m_program.release();
 
     return true;
 }

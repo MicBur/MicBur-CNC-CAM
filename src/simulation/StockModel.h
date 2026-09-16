@@ -38,9 +38,34 @@ public:
     bool isCylinder{false};
     double cylinderRadius{0.0};
 
+    /** Bearbeitungsspur je Gitterpunkt (letzter Fräserkontakt) für die Darstellung von Fräserspuren. */
+    struct ToolMark {
+        float u{0.0f};       // Koordinate entlang der Vorschubrichtung (mm); beim Eintauchen: Abstand zur Mitte
+        float d{0.0f};       // Abstand quer zur Bahn (mm, links positiv)
+        float radius{0.0f};  // Werkzeugradius (mm)
+        float pitch{0.0f};   // Vorschub je Umdrehung (mm)
+        float dirX{1.0f};    // Vorschubrichtung
+        float dirY{0.0f};
+        uint8_t kind{0};     // 0 = ungefräst, 1 = Schaft-/Planfräser, 2 = Kugelfräser, 3 = Bohren/Eintauchen
+    };
+    std::vector<ToolMark> marks; // resX * resY
+
+    /** Darstellungsdaten je Oberflächenpunkt (parallel zu Surface::vertices). */
+    struct VertexShading {
+        float ao{1.0f};          // Umgebungsverdeckung 0..1
+        float markU{0.0f};
+        float markD{0.0f};
+        float markRadius{0.0f};
+        float markPitch{0.0f};
+        float dirX{1.0f};
+        float dirY{0.0f};
+        float kind{0.0f};        // 0 = ungefräst
+    };
+
     /** Dreiecksoberfläche des Rohteils (gemeinsam für GPU-Darstellung und STL-Export). */
     struct Surface {
         std::vector<Geometry::Vertex> vertices;
+        std::vector<VertexShading> shading; // parallel zu vertices
         std::vector<uint32_t> indices;
     };
 
@@ -52,7 +77,9 @@ public:
     void initFromMesh(const Geometry::Mesh& mesh);
     void maskCylinder(double radius);  // Carve away everything outside the cylinder radius
     void carveCylinder(const Core::Vector3D& toolCenter, double radius, double cutZ, const QColor& toolColor = QColor(255, 230, 20));
-    void carveSegment(const Core::Vector3D& p0, const Core::Vector3D& p1, double radius, const QColor& toolColor = QColor(255, 230, 20));
+    // markKind: 1 = Schaft-/Planfräser, 2 = Kugelfräser, 3 = Bohren; markPitch = Vorschub je Umdrehung (mm)
+    void carveSegment(const Core::Vector3D& p0, const Core::Vector3D& p1, double radius,
+                      const QColor& toolColor = QColor(255, 230, 20), int markKind = 1, double markPitch = 0.0);
 
     [[nodiscard]] Surface buildSurface() const;
     [[nodiscard]] Geometry::Mesh toMesh() const;
