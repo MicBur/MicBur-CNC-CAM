@@ -61,28 +61,49 @@ ConversationalBlock ConversationalProgram::resolvedBlock(size_t index) const {
         }
     }
 
-    // Tasche aus Kontur: die direkt folgenden Insel-Konturen werden ausgespart
-    if (block.type == BlockType::Contour && block.contourRole == ContourRole::Pocket) {
+    // Taschengrenze (Rahmen, Kreis, Kontur): die direkt folgenden Insel-Blöcke werden ausgespart
+    if (block.isPocketBoundary()) {
         for (size_t k = index + 1; k < blocks.size(); ++k) {
             const auto& next = blocks[k];
-            if (next.type != BlockType::Contour || next.contourRole != ContourRole::Island) break;
+            if (!next.isPocketIsland()) break; // erster Block, der keine Insel ist, beendet die Gruppe
             if (!next.enabled) continue;
-            if (!next.segments.empty()) {
-                block.pocketIslands.push_back(next.segments);
-            } else if (next.contour.points.size() >= 3) {
-                std::vector<Geometry::ContourSegment> segs;
-                for (size_t n = 0; n < next.contour.points.size(); ++n) {
-                    Geometry::ContourSegment seg;
-                    seg.type = (n == 0) ? Geometry::ContourSegmentType::StartPoint : Geometry::ContourSegmentType::Line;
-                    seg.x = next.contour.points[n].x;
-                    seg.y = next.contour.points[n].y;
-                    segs.push_back(seg);
-                }
-                block.pocketIslands.push_back(segs);
-            }
+            auto segs = next.islandSegments();
+            if (segs.size() >= 3) block.pocketIslands.push_back(std::move(segs));
         }
     }
     return block;
+}
+
+int ConversationalProgram::pocketBoundaryFor(size_t index) const {
+    if (index >= blocks.size() || !blocks[index].isPocketIsland()) return -1;
+    size_t k = index;
+    while (k > 0 && blocks[k - 1].isPocketIsland()) --k;
+    if (k == 0 || !blocks[k - 1].isPocketBoundary()) return -1;
+    return static_cast<int>(k - 1);
+}
+
+void ConversationalProgram::upgradeEmbeddedIslands() {
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (!blocks[i].isPocketBoundary() || blocks[i].pocketIslands.empty()) continue;
+
+        // Hinter vorhandene Insel-Blöcke einreihen, damit die Gruppe zusammenhängend bleibt
+        size_t insertAt = i + 1;
+        while (insertAt < blocks.size() && blocks[insertAt].isPocketIsland()) ++insertAt;
+
+        const auto islands = blocks[i].pocketIslands;
+        blocks[i].pocketIslands.clear();
+        for (const auto& segs : islands) {
+            ConversationalBlock island(nextBlockId(), BlockType::Contour, QString());
+            island.name = QStringLiteral("%1: Insel").arg(island.id);
+            island.setEffectiveMillingType(MillingType::Island);
+            island.contourZForAll = true;
+            island.segments = segs;
+            island.contour = Geometry::Contour::createFromSegments(segs, true);
+            blocks.insert(blocks.begin() + static_cast<std::ptrdiff_t>(insertAt), island);
+            ++insertAt;
+        }
+        i = insertAt - 1;
+    }
 }
 
 bool ConversationalProgram::upgradeDrillBlock(size_t index) {
@@ -437,6 +458,7 @@ ConversationalProgram ConversationalProgram::loadFromFile(const QString& filePat
             }
         }
     }
+    prog.upgradeEmbeddedIslands();
 
     return prog;
 }

@@ -75,6 +75,7 @@ signals:
 
 public slots:
     void onAddBlockClicked(CAM::BlockType type);
+    void onAddPocketShapeClicked(CAM::PocketShape shape); // Hurco: Rahmen / Kreis
     void onRemoveBlockClicked();
     void onMoveUpClicked();
     void onMoveDownClicked();
@@ -173,7 +174,6 @@ private:
     QCheckBox* m_chkUseStockDims{nullptr};
 
     // ─── Kontur Seite ───
-    QComboBox* m_cmbContourSide{nullptr};
     QDoubleSpinBox* m_spinAllowance{nullptr};
     QDoubleSpinBox* m_spinLeadRadius{nullptr};
     QComboBox* m_cmbLeadType{nullptr};
@@ -182,7 +182,6 @@ private:
     QDoubleSpinBox* m_spinTabHeight{nullptr};
     QSpinBox* m_spinTabCount{nullptr};
     QFormLayout* m_contourForm{nullptr};
-    QComboBox* m_cmbContourRole{nullptr};      // Kontur / Tasche / Insel
     QCheckBox* m_chkContourZForAll{nullptr};   // Z UNTEN für alle Segmente
     QComboBox* m_cmbContourPocketStrategy{nullptr};
     QLabel* m_lblContourRoleInfo{nullptr};
@@ -198,8 +197,14 @@ private:
 
     // ─── Untere Technologie-Tabs (Hurco Style) ───
     QTabWidget* m_techTabWidget{nullptr};
-    QComboBox* m_cmbMillingType{nullptr}; // ON, INSIDE, OUTSIDE, POCKET
+    QComboBox* m_cmbMillingType{nullptr}; // Fräsart (Hurco): Auf, Links, Rechts, Innen, Außen, Taschengrenze, Insel
     QLabel* m_lblMillingType{nullptr};    // Label für FRÄSART (ausblendbar)
+    QLabel* m_lblMillingInfo{nullptr};    // Hinweis zu Taschengrenze / Insel
+    QFormLayout* m_pocketForm{nullptr};
+    QLayout* m_pocketIslandRow{nullptr};
+    void fillMillingTypeCombo(const CAM::ConversationalBlock& b);
+    void updateMillingInfo(int index);
+    [[nodiscard]] QString blockKindText(const CAM::ConversationalBlock& b) const;
     QComboBox* m_cmbStartSide{nullptr};   // BOTTOM, TOP, LEFT, RIGHT
 
     // ─── Tasche / Rahmen Seite (Hurco Frame) ───

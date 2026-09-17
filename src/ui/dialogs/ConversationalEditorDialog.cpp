@@ -94,6 +94,7 @@ struct ConversationalEditorDialog::UndoGroup {
 ConversationalEditorDialog::ConversationalEditorDialog(QWidget* parent) : QWidget(parent) {
     m_program = CAM::ConversationalProgram::createSampleProgram();
     m_program.upgradeLegacyDrillBlocks(); // Hurco: Bohrungen + Bohrpositionen
+    m_program.upgradeEmbeddedIslands();   // Hurco: Inseln als eigene Blöcke
     m_toolLibrary = Core::ToolDefinition::createDefaultLibrary();
     m_undoStack = new QUndoStack(this);
     m_undoStack->setUndoLimit(100);
@@ -194,13 +195,20 @@ void ConversationalEditorDialog::setupUi() {
     auto* topBtnLayout = new QHBoxLayout();
     auto makeAddBtn = [this, topBtnLayout](const QString& text, CAM::BlockType type, const QString& color) {
         auto* btn = new QPushButton(text, this);
-        btn->setStyleSheet(QString("background-color: %1; color: white; font-weight: bold; font-size: 11px; padding: 5px; border-radius: 3px;").arg(color));
+        btn->setStyleSheet(QString("background-color: %1; color: white; font-weight: bold; font-size: 11px; padding: 5px 2px; border-radius: 3px;").arg(color));
         connect(btn, &QPushButton::clicked, this, [this, type]() { onAddBlockClicked(type); });
+        topBtnLayout->addWidget(btn);
+    };
+    auto makeShapeBtn = [this, topBtnLayout](const QString& text, CAM::PocketShape shape, const QString& color) {
+        auto* btn = new QPushButton(text, this);
+        btn->setStyleSheet(QString("background-color: %1; color: white; font-weight: bold; font-size: 11px; padding: 5px 2px; border-radius: 3px;").arg(color));
+        connect(btn, &QPushButton::clicked, this, [this, shape]() { onAddPocketShapeClicked(shape); });
         topBtnLayout->addWidget(btn);
     };
 
     makeAddBtn("+ Planen", CAM::BlockType::Facing, "#2B6CB0");
-    makeAddBtn("+ Tasche", CAM::BlockType::Pocket, "#319795");
+    makeShapeBtn("+ Rahmen", CAM::PocketShape::Rectangle, "#319795");
+    makeShapeBtn("+ Kreis", CAM::PocketShape::Circle, "#2C7A7B");
     makeAddBtn("+ Kontur", CAM::BlockType::Contour, "#D69E2E");
     makeAddBtn("+ Langloch", CAM::BlockType::Slot, "#DD6B20");
     makeAddBtn("+ Helix", CAM::BlockType::HelixThread, "#38A169");
@@ -327,6 +335,23 @@ void ConversationalEditorDialog::setupUi() {
     geomCommonLayout->addWidget(m_lblTargetZ); geomCommonLayout->addWidget(m_spinTargetZ);
     detailLayout->addLayout(geomCommonLayout);
 
+    auto* millingRow = new QHBoxLayout();
+    m_lblMillingType = new QLabel(QStringLiteral("FRÄSART:"), this);
+    m_cmbMillingType = new QComboBox(this);
+    connect(m_cmbMillingType, &QComboBox::currentIndexChanged, this, [this]() {
+        if (m_isUpdatingUi) return;
+        const UndoGroup undoGroup(this, QStringLiteral("Fräsart ändern"));
+        saveCurrentBlockFromUi();
+        refreshBlockList();                   // Inseln werden eingerückt
+        loadBlockToUi(m_selectedBlockIndex);  // nur die nötigen Felder zeigen
+    });
+    m_lblMillingInfo = new QLabel(this);
+    m_lblMillingInfo->setWordWrap(true);
+    millingRow->addWidget(m_lblMillingType);
+    millingRow->addWidget(m_cmbMillingType);
+    millingRow->addWidget(m_lblMillingInfo, 1);
+    detailLayout->addLayout(millingRow);
+
     // 4. Kontext-spezifischer Stack für Block-Typen (Geometrie)
     m_stackParams = new QStackedWidget(this);
 
@@ -375,23 +400,13 @@ void ConversationalEditorDialog::setupUi() {
     lContour->setSpacing(6);
     m_contourForm = lContour;
 
-    m_cmbContourRole = new QComboBox(this);
-    m_cmbContourRole->addItems({QStringLiteral("Kontur (Fräsbahn)"), QStringLiteral("Tasche (ausräumen)"),
-                                QStringLiteral("Insel (in vorheriger Tasche)")});
-    connect(m_cmbContourRole, &QComboBox::currentIndexChanged, this, [this]() {
-        if (m_isUpdatingUi) return;
-        saveCurrentBlockFromUi();
-        loadBlockToUi(m_selectedBlockIndex); // nur die nötigen Felder zeigen
-    });
-    lContour->addRow(QStringLiteral("Konturart:"), m_cmbContourRole);
-
     m_chkContourZForAll = new QCheckBox(QStringLiteral("Z UNTEN von Segment 0 gilt für alle Segmente"), this);
     m_chkContourZForAll->setToolTip(QStringLiteral("Aus: Z END kann je Segment eingegeben werden (z. B. schräge Konturen)."));
     connect(m_chkContourZForAll, &QCheckBox::toggled, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
     lContour->addRow(QStringLiteral("Tiefe:"), m_chkContourZForAll);
 
     m_cmbContourPocketStrategy = new QComboBox(this);
-    m_cmbContourPocketStrategy->addItems({QStringLiteral("Zickzack"), QStringLiteral("Spiral (innen→außen)"), QStringLiteral("Konturparallel")});
+    m_cmbContourPocketStrategy->addItems({QStringLiteral("Zickzack"), QStringLiteral("Auswärts (Spirale von innen)"), QStringLiteral("Einwärts (konturparallel)")});
     connect(m_cmbContourPocketStrategy, &QComboBox::currentIndexChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
     lContour->addRow(QStringLiteral("Räumstrategie:"), m_cmbContourPocketStrategy);
 
@@ -400,10 +415,6 @@ void ConversationalEditorDialog::setupUi() {
     m_lblContourRoleInfo->setStyleSheet("color: #90CDF4;");
     lContour->addRow(m_lblContourRoleInfo);
 
-    m_cmbContourSide = new QComboBox(this);
-    m_cmbContourSide->addItems({QStringLiteral("Außen"), QStringLiteral("Innen"), QStringLiteral("Auf Kontur")});
-    connect(m_cmbContourSide, &QComboBox::currentIndexChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
-    lContour->addRow(QStringLiteral("Bahnkorrektur:"), m_cmbContourSide);
 
     m_spinAllowance = makeSpinMM(0, 10, 0.2);
 
@@ -457,10 +468,16 @@ void ConversationalEditorDialog::setupUi() {
     auto* pagePocket = new QWidget(this);
     auto* lPocket = new QFormLayout(pagePocket);
     lPocket->setSpacing(6);
+    m_pocketForm = lPocket;
 
     m_cmbPocketShape = new QComboBox(this);
-    m_cmbPocketShape->addItems({QStringLiteral("Rechteck"), QStringLiteral("Kreis"), QStringLiteral("DXF-Kontur")});
-    connect(m_cmbPocketShape, &QComboBox::currentIndexChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
+    m_cmbPocketShape->addItems({QStringLiteral("Rahmen (Rechteck)"), QStringLiteral("Kreis"), QStringLiteral("DXF-Kontur")});
+    connect(m_cmbPocketShape, &QComboBox::currentIndexChanged, this, [this]() {
+        if (m_isUpdatingUi) return;
+        saveCurrentBlockFromUi();
+        refreshBlockList();
+        loadBlockToUi(m_selectedBlockIndex);
+    });
     lPocket->addRow(QStringLiteral("Geometrie:"), m_cmbPocketShape);
 
     auto* pDimLayout = new QHBoxLayout();
@@ -481,17 +498,21 @@ void ConversationalEditorDialog::setupUi() {
     lPocket->addRow(QStringLiteral("Startkante:"), m_cmbStartSide);
 
     m_cmbPocketStrategy = new QComboBox(this);
-    m_cmbPocketStrategy->addItems({QStringLiteral("Zickzack"), QStringLiteral("Spiral (innen→außen)"), QStringLiteral("Konturparallel")});
+    m_cmbPocketStrategy->addItems({QStringLiteral("Zickzack"), QStringLiteral("Auswärts (Spirale von innen)"), QStringLiteral("Einwärts (konturparallel)")});
     connect(m_cmbPocketStrategy, &QComboBox::currentIndexChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
     lPocket->addRow(QStringLiteral("Räumstrategie:"), m_cmbPocketStrategy);
 
     // --- Insel-Management ---
     auto* islandLayout = new QHBoxLayout();
-    m_lblIslandsCount = new QLabel("Keine Inseln definiert");
-    m_btnManageIslands = new QPushButton("Inseln bearbeiten...");
-    connect(m_btnManageIslands, &QPushButton::clicked, this, &ConversationalEditorDialog::onManageIslandsClicked);
-    islandLayout->addWidget(m_lblIslandsCount);
+    m_lblIslandsCount = new QLabel(this);
+    m_lblIslandsCount->setWordWrap(true);
+    // Inseln sind eigene Blöcke (Rahmen, Kreis oder Kontur mit Fräsart „Insel“) direkt nach der Taschengrenze
+    m_btnManageIslands = new QPushButton(QStringLiteral("+ Insel (Kreis)"), this);
+    m_btnManageIslands->setStyleSheet("background-color: #2C7A7B; color: white; font-weight: bold; padding: 3px 8px; border-radius: 3px;");
+    connect(m_btnManageIslands, &QPushButton::clicked, this, [this]() { onAddPocketShapeClicked(CAM::PocketShape::Circle); });
+    islandLayout->addWidget(m_lblIslandsCount, 1);
     islandLayout->addWidget(m_btnManageIslands);
+    m_pocketIslandRow = islandLayout;
     lPocket->addRow(QStringLiteral("Inseln:"), islandLayout);
 
     // --- Schlicht-Optionen ---
@@ -1243,16 +1264,6 @@ void ConversationalEditorDialog::setupUi() {
     connect(m_cmbTool, &QComboBox::currentIndexChanged, this, &ConversationalEditorDialog::onToolChanged);
     lRough->addRow(QStringLiteral("WERKZEUG:"), m_cmbTool);
 
-    m_cmbMillingType = new QComboBox(this);
-    m_cmbMillingType->addItems({
-        QStringLiteral("AUF KONTUR (ON)"),
-        QStringLiteral("INNEN (INSIDE)"),
-        QStringLiteral("AUSSEN (OUTSIDE)"),
-        QStringLiteral("TASCHE (POCKET)")
-    });
-    connect(m_cmbMillingType, &QComboBox::currentIndexChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
-    m_lblMillingType = new QLabel(QStringLiteral("FRÄSART:"), this);
-    lRough->addRow(m_lblMillingType, m_cmbMillingType);
 
     auto* roughFeedRow = new QHBoxLayout();
     m_spinFeed = makeSpinMM(10, 10000, 1500); m_spinFeed->setSuffix(" mm/min");
@@ -1374,9 +1385,7 @@ void ConversationalEditorDialog::setupUi() {
         if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
         auto& b = m_program[m_selectedBlockIndex];
         if (toolId > 0) b.toolId = toolId;
-        if (m_segmentEditorMode == SegmentEditorMode::BlockContour) {
-            b.contourSide = static_cast<CAM::ContourSide>(contourSide);
-        }
+        Q_UNUSED(contourSide) // Fräsart kommt aus dem Startsegment (contourOptionsChanged)
         b.feedRate = feed;
         b.plungeFeedRate = plunge;
         b.spindleRpm = rpm;
@@ -1386,12 +1395,12 @@ void ConversationalEditorDialog::setupUi() {
     m_masterStack->addWidget(m_segmentEditor);     // Index 1: Segment-Datensatz-Editor
 
     // Segment-Editor → Konturart (Kontur/Tasche/Insel) und "Z für alle Segmente" in den Block
-    connect(m_segmentEditor, &ContourSegmentEditorDialog::contourOptionsChanged, this, [this](int role, bool zForAll) {
+    connect(m_segmentEditor, &ContourSegmentEditorDialog::contourOptionsChanged, this, [this](int millingType, bool zForAll) {
         if (m_segmentEditorMode != SegmentEditorMode::BlockContour) return;
         if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
-        const UndoGroup undoGroup(this, QStringLiteral("Konturart ändern"));
+        const UndoGroup undoGroup(this, QStringLiteral("Fräsart ändern"));
         auto& b = m_program[m_selectedBlockIndex];
-        b.contourRole = static_cast<CAM::ContourRole>(std::clamp(role, 0, 2));
+        b.setEffectiveMillingType(static_cast<CAM::MillingType>(std::clamp(millingType, 0, 6)));
         b.contourZForAll = zForAll;
         b.segments = m_segmentEditor->segments();
         refreshBlockList();
@@ -1524,11 +1533,8 @@ QString ConversationalEditorDialog::blockListLabel(int index) const {
     const auto& b = m_program[index];
     if (b.type == CAM::BlockType::PatternEnd && depth > 0) --depth;
 
-    QString typeText = CAM::blockTypeToString(b.type);
-    if (b.type == CAM::BlockType::Contour && b.contourRole == CAM::ContourRole::Pocket) typeText = QStringLiteral("Kontur-Tasche");
-    if (b.type == CAM::BlockType::Contour && b.contourRole == CAM::ContourRole::Island) typeText = QStringLiteral("Insel");
-    const bool attached = b.type == CAM::BlockType::DrillPositions
-        || (b.type == CAM::BlockType::Contour && b.contourRole == CAM::ContourRole::Island);
+    const QString typeText = blockKindText(b);
+    const bool attached = b.type == CAM::BlockType::DrillPositions || b.isPocketIsland();
     return QString("%1%2[%3] %4")
         .arg(QStringLiteral("│   ").repeated(depth))
         .arg(attached ? QStringLiteral("  ↳ ") : QString())
@@ -1629,8 +1635,8 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
         }
     }
 
-    m_lblBlockBigHeader->setText(QString("BLOCK %1    %2").arg(index + 1).arg(CAM::blockTypeToString(b.type).toUpper()));
-    m_cmbMillingType->setCurrentIndex(static_cast<int>(b.millingType));
+    m_lblBlockBigHeader->setText(QString("BLOCK %1    %2").arg(index + 1).arg(blockKindText(b).toUpper()));
+    fillMillingTypeCombo(b);
     m_cmbStartSide->setCurrentIndex(static_cast<int>(b.startSide));
 
     m_spinRpm->setValue(b.spindleRpm);
@@ -1651,14 +1657,14 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
     m_spinFinishStep->setValue(b.finishStepDown);
     m_cmbApproach->setCurrentIndex(b.approachType);
 
-    // Fräsart-Dropdown nur bei relevanten Blocktypen anzeigen (Kontur: Bahnkorrektur auf der Kontur-Seite)
-    bool showMillingType = (b.type == CAM::BlockType::Pocket ||
-                            b.type == CAM::BlockType::Slot);
+    // Fräsart (Hurco) bei Rahmen, Kreis, Kontur und Langloch
+    const bool showMillingType = (b.type == CAM::BlockType::Pocket || b.type == CAM::BlockType::Contour ||
+                                  b.type == CAM::BlockType::Slot);
 
     // Gemeinsame Felder nur abfragen, wo sie gebraucht werden (Hurco: Bohrungen nur Z, Bohrpositionen nur X/Y)
     const bool isDrill = b.type == CAM::BlockType::Drill;
     const bool isPositions = b.type == CAM::BlockType::DrillPositions;
-    const bool isIsland = b.type == CAM::BlockType::Contour && b.contourRole == CAM::ContourRole::Island;
+    const bool isIsland = b.isPocketIsland(); // Tiefe, Werkzeug und Technologie aus der Taschengrenze
     // Positionsliste: Koordinaten stehen in der Tabelle
     const bool showXY = !isDrill && b.type != CAM::BlockType::Contour
         && !(isPositions && b.drillPattern == CAM::DrillPattern::Manual);
@@ -1679,6 +1685,7 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
     m_lblPosY->setText(isPositions && !listPositions ? QStringLiteral("Mitte Y:") : QStringLiteral("Y:"));
     m_cmbMillingType->setVisible(showMillingType);
     m_lblMillingType->setVisible(showMillingType);
+    updateMillingInfo(index);
 
     // Kontextseite einstellen
     switch (b.type) {
@@ -1690,7 +1697,6 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
             break;
         case CAM::BlockType::Contour:
             m_stackParams->setCurrentIndex(1);
-            m_cmbContourSide->setCurrentIndex(static_cast<int>(b.contourSide));
             m_spinAllowance->setValue(b.finishAllowance);
             m_cmbLeadType->setCurrentIndex(b.leadType);
             m_spinLeadRadius->setValue(b.leadRadius);
@@ -1699,7 +1705,6 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
             m_spinTabWidth->setValue(b.tabWidth);
             m_spinTabHeight->setValue(b.tabHeight);
             m_lblContourStatus->setText(b.contour.empty() ? QStringLiteral("Standard-Rechteck") : QString("%1 Punkte").arg(b.contour.points.size()));
-            m_cmbContourRole->setCurrentIndex(static_cast<int>(b.contourRole));
             m_chkContourZForAll->setChecked(b.contourZForAll);
             m_cmbContourPocketStrategy->setCurrentIndex(std::clamp(b.pocketStrategy, 0, 2));
             updateContourRoleVisibility();
@@ -1720,11 +1725,24 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
             m_spinFinishFeed->setValue(b.finishFeedRate);
             m_spinFinishSpindle->setValue(b.finishSpindleRpm);
             
-            // Island count
-            if (b.pocketIslands.empty()) {
-                m_lblIslandsCount->setText("Keine Inseln definiert");
-            } else {
-                m_lblIslandsCount->setText(QString("%1 Insel(n)").arg(b.pocketIslands.size()));
+            // Nur die Daten der gewählten Fräsart abfragen
+            {
+                const bool boundary = b.millingType == CAM::MillingType::Pocket;
+                const bool island = b.millingType == CAM::MillingType::Island;
+                const bool rect = b.pocketShape == CAM::PocketShape::Rectangle;
+                m_pocketForm->setRowVisible(m_spinPocketCornerR, rect);
+                m_spinPocketWidthX->setEnabled(rect);
+                m_spinPocketDepthY->setEnabled(rect);
+                m_spinPocketRadius->setEnabled(b.pocketShape == CAM::PocketShape::Circle);
+                m_pocketForm->setRowVisible(m_cmbStartSide, boundary);
+                m_pocketForm->setRowVisible(m_cmbPocketStrategy, boundary);
+                m_pocketForm->setRowVisible(m_grpFinishing, !island);
+                m_pocketForm->setRowVisible(m_pocketIslandRow, boundary);
+                const auto resolved = m_program.resolvedBlock(static_cast<size_t>(index));
+                const size_t islandCount = boundary ? resolved.pocketIslands.size() : 0;
+                m_lblIslandsCount->setText(islandCount == 0
+                    ? QStringLiteral("Keine Inseln – direkt danach Rahmen, Kreis oder Kontur mit Fräsart „Insel“ anlegen.")
+                    : QStringLiteral("%1 Insel(n) aus den folgenden Insel-Blöcken").arg(islandCount));
             }
             break;
         case CAM::BlockType::Drill:
@@ -1877,7 +1895,10 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
 
     b.posX = m_spinPosX->value();
     b.posY = m_spinPosY->value();
-    b.millingType = static_cast<CAM::MillingType>(m_cmbMillingType->currentIndex());
+    if (m_cmbMillingType->currentIndex() >= 0
+        && (b.type == CAM::BlockType::Pocket || b.type == CAM::BlockType::Contour || b.type == CAM::BlockType::Slot)) {
+        b.setEffectiveMillingType(static_cast<CAM::MillingType>(m_cmbMillingType->currentData().toInt()));
+    }
     b.startSide = static_cast<CAM::FrameStartSide>(m_cmbStartSide->currentIndex());
     b.millingDirection = m_cmbMillDirection->currentIndex();
     b.coolantOn = m_chkCoolant->isChecked();
@@ -1890,7 +1911,6 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
         b.areaDepth = m_spinFaceDepth->value();
         b.useStockDimensions = m_chkUseStockDims->isChecked();
     } else if (b.type == CAM::BlockType::Contour) {
-        b.contourSide = static_cast<CAM::ContourSide>(m_cmbContourSide->currentIndex());
         b.finishAllowance = m_spinAllowance->value();
         b.leadType = m_cmbLeadType->currentIndex();
         b.leadRadius = m_spinLeadRadius->value();
@@ -1898,7 +1918,6 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
         b.tabCount = m_spinTabCount->value();
         b.tabWidth = m_spinTabWidth->value();
         b.tabHeight = m_spinTabHeight->value();
-        b.contourRole = static_cast<CAM::ContourRole>(std::clamp(m_cmbContourRole->currentIndex(), 0, 2));
         b.contourZForAll = m_chkContourZForAll->isChecked();
         if (b.contourRole == CAM::ContourRole::Pocket) b.pocketStrategy = m_cmbContourPocketStrategy->currentIndex();
         // Block-Z-Ebenen → Segment 0 und alle Folgesegmente mit bisheriger Tiefe
@@ -2208,11 +2227,109 @@ void ConversationalEditorDialog::saveDrillOpFromUi() {
     saveCurrentBlockFromUi();
 }
 
+void ConversationalEditorDialog::onAddPocketShapeClicked(CAM::PocketShape shape) {
+    const UndoGroup undoGroup(this, shape == CAM::PocketShape::Circle ? QStringLiteral("Kreis hinzufügen") : QStringLiteral("Rahmen hinzufügen"));
+    onAddBlockClicked(CAM::BlockType::Pocket);
+    if (m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+    auto& b = m_program[m_selectedBlockIndex];
+    b.pocketShape = shape;
+    b.name = QStringLiteral("%1: %2").arg(b.id).arg(shape == CAM::PocketShape::Circle ? QStringLiteral("Kreis") : QStringLiteral("Rahmen"));
+    refreshBlockList();
+    loadBlockToUi(m_selectedBlockIndex);
+}
+
+QString ConversationalEditorDialog::blockKindText(const CAM::ConversationalBlock& b) const {
+    QString kind = CAM::blockTypeToString(b.type);
+    if (b.type == CAM::BlockType::Pocket) {
+        kind = b.pocketShape == CAM::PocketShape::Circle ? QStringLiteral("Kreis")
+             : b.pocketShape == CAM::PocketShape::Rectangle ? QStringLiteral("Rahmen") : QStringLiteral("DXF-Kontur");
+    } else if (b.type == CAM::BlockType::Contour) {
+        kind = QStringLiteral("Kontur");
+    }
+    if (b.type == CAM::BlockType::Pocket || b.type == CAM::BlockType::Contour) {
+        kind += QStringLiteral(" · ") + CAM::millingTypeName(b.effectiveMillingType());
+    }
+    return kind;
+}
+
+void ConversationalEditorDialog::fillMillingTypeCombo(const CAM::ConversationalBlock& b) {
+    using MT = CAM::MillingType;
+    std::vector<MT> types;
+    if (b.type == CAM::BlockType::Contour) {
+        types = {MT::OnContour, MT::Left, MT::Right, MT::Inside, MT::Outside, MT::Pocket, MT::Island};
+    } else if (b.type == CAM::BlockType::Pocket) {
+        types = {MT::OnContour, MT::Inside, MT::Outside, MT::Pocket, MT::Island};
+    } else {
+        types = {MT::OnContour, MT::Inside, MT::Outside, MT::Pocket};
+    }
+    const bool wasUpdating = m_isUpdatingUi;
+    m_isUpdatingUi = true;
+    m_cmbMillingType->clear();
+    for (const auto t : types) {
+        QString text = CAM::millingTypeName(t).toUpper();
+        if (t == MT::Left) text += QStringLiteral(" (GLEICHLAUF)");
+        if (t == MT::Right) text += QStringLiteral(" (GEGENLAUF)");
+        if (t == MT::Pocket && b.type == CAM::BlockType::Slot) text = QStringLiteral("TASCHE (AUSRÄUMEN)");
+        m_cmbMillingType->addItem(text, static_cast<int>(t));
+    }
+    const int idx = m_cmbMillingType->findData(static_cast<int>(b.effectiveMillingType()));
+    m_cmbMillingType->setCurrentIndex(idx >= 0 ? idx : 0);
+    m_isUpdatingUi = wasUpdating;
+}
+
+void ConversationalEditorDialog::updateMillingInfo(int index) {
+    m_lblMillingInfo->clear();
+    if (index < 0 || index >= static_cast<int>(m_program.size())) return;
+    const auto& b = m_program[index];
+    const auto warn = [this](const QString& text) {
+        m_lblMillingInfo->setText(text);
+        m_lblMillingInfo->setStyleSheet("color: #F6AD55; font-weight: bold;");
+    };
+    const auto info = [this](const QString& text) {
+        m_lblMillingInfo->setText(text);
+        m_lblMillingInfo->setStyleSheet("color: #68D391; font-weight: bold;");
+    };
+
+    if (b.isPocketBoundary()) {
+        const auto resolved = m_program.resolvedBlock(static_cast<size_t>(index));
+        const size_t islands = resolved.pocketIslands.size();
+        if (islands > 0 && b.pocketStrategy == 1) {
+            warn(QStringLiteral("⚠ Auswärts ist mit Inseln nicht möglich – es wird einwärts gefräst."));
+        } else {
+            info(islands == 0 ? QStringLiteral("Taschengrenze ohne Inseln")
+                              : QStringLiteral("Taschengrenze mit %1 Insel(n)").arg(islands));
+        }
+        return;
+    }
+    if (!b.isPocketIsland()) return;
+
+    const int owner = m_program.pocketBoundaryFor(static_cast<size_t>(index));
+    if (owner < 0) {
+        warn(QStringLiteral("⚠ Keine Taschengrenze davor – Inseln müssen direkt auf eine Taschengrenze folgen."));
+        return;
+    }
+    const auto& boundaryBlock = m_program[owner];
+    const Geometry::Contour outline = boundaryBlock.type == CAM::BlockType::Contour
+        ? Geometry::Contour::createFromSegments(boundaryBlock.islandSegments(), true)
+        : boundaryBlock.pocketBoundaryContour();
+    bool inside = !outline.points.empty();
+    for (const auto& seg : b.islandSegments()) {
+        if (!outline.containsPoint(seg.x, seg.y)) { inside = false; break; }
+    }
+    if (!inside) {
+        warn(QStringLiteral("⚠ Insel liegt nicht ganz innerhalb der Taschengrenze (Block %1).").arg(owner + 1));
+    } else if (boundaryBlock.pocketStrategy == 1) {
+        warn(QStringLiteral("⚠ Taschengrenze (Block %1) fräst auswärts – mit Inseln wird einwärts gefräst.").arg(owner + 1));
+    } else {
+        info(QStringLiteral("Insel von Block %1 · Z %2 bis %3 aus der Taschengrenze")
+                 .arg(owner + 1).arg(boundaryBlock.startZ, 0, 'f', 3).arg(boundaryBlock.targetZ, 0, 'f', 3));
+    }
+}
+
 void ConversationalEditorDialog::updateContourRoleVisibility() {
-    if (!m_contourForm || !m_cmbContourRole) return;
-    const auto role = static_cast<CAM::ContourRole>(std::clamp(m_cmbContourRole->currentIndex(), 0, 2));
+    if (!m_contourForm || m_selectedBlockIndex < 0 || m_selectedBlockIndex >= static_cast<int>(m_program.size())) return;
+    const auto role = m_program[m_selectedBlockIndex].contourRole;
     const bool profile = role == CAM::ContourRole::Profile;
-    m_contourForm->setRowVisible(m_cmbContourSide, profile);
     m_contourForm->setRowVisible(m_contourLeadRow, profile);
     m_contourForm->setRowVisible(m_contourTabRow, profile);
     m_contourForm->setRowVisible(m_chkContourZForAll, profile);
@@ -2224,10 +2341,10 @@ void ConversationalEditorDialog::updateContourRoleVisibility() {
                 : QStringLiteral("Z END wird im Datensatz-Editor je Segment eingegeben."));
             break;
         case CAM::ContourRole::Pocket:
-            m_lblContourRoleInfo->setText(QStringLiteral("Tasche: Innenraum wird bis Z UNTEN ausgeräumt. Inseln = direkt folgende Kontur-Blöcke mit Konturart „Insel“."));
+            m_lblContourRoleInfo->setText(QStringLiteral("Taschengrenze: Innenraum wird bis Z UNTEN ausgeräumt. Inseln = direkt folgende Blöcke mit Fräsart „Insel“."));
             break;
         case CAM::ContourRole::Island:
-            m_lblContourRoleInfo->setText(QStringLiteral("Insel: bleibt in der vorangehenden Kontur-Tasche stehen. Tiefe und Werkzeug kommen aus der Tasche."));
+            m_lblContourRoleInfo->setText(QStringLiteral("Insel: bleibt in der Taschengrenze davor stehen. Tiefe und Werkzeug kommen aus der Taschengrenze."));
             break;
     }
 }
@@ -2240,6 +2357,23 @@ void ConversationalEditorDialog::onAddBlockClicked(CAM::BlockType type) {
 
     if (type == CAM::BlockType::Contour) {
         newBlock.contourZForAll = true; // Hurco: Z UNTEN von Segment 0 gilt für alle Segmente
+    }
+    // Nach einer Taschengrenze oder Insel folgen Inseln: direkt in die Inselgruppe einfügen (Hurco)
+    size_t islandInsertAt = m_program.size() + 1; // > size: normal anhängen
+    if ((type == CAM::BlockType::Contour || type == CAM::BlockType::Pocket)
+        && m_selectedBlockIndex >= 0 && m_selectedBlockIndex < static_cast<int>(m_program.size())) {
+        const auto& selected = m_program[m_selectedBlockIndex];
+        if (selected.isPocketBoundary() || selected.isPocketIsland()) {
+            const int owner = selected.isPocketBoundary() ? m_selectedBlockIndex
+                                                          : m_program.pocketBoundaryFor(static_cast<size_t>(m_selectedBlockIndex));
+            const auto& depthSource = owner >= 0 ? m_program[owner] : selected;
+            newBlock.setEffectiveMillingType(CAM::MillingType::Island);
+            newBlock.startZ = depthSource.startZ;
+            newBlock.targetZ = depthSource.targetZ;
+            newBlock.toolId = depthSource.toolId;
+            islandInsertAt = static_cast<size_t>(m_selectedBlockIndex) + 1;
+            while (islandInsertAt < m_program.size() && m_program[islandInsertAt].isPocketIsland()) ++islandInsertAt;
+        }
     }
     if (type == CAM::BlockType::Drill) {
         newBlock.startZ = 0.0;
@@ -2277,6 +2411,14 @@ void ConversationalEditorDialog::onAddBlockClicked(CAM::BlockType type) {
             }
             newBlock.targetZ = realDepth;
         }
+    }
+
+    if (islandInsertAt <= m_program.size()) {
+        m_program.insertBlock(islandInsertAt, newBlock);
+        m_selectedBlockIndex = static_cast<int>(islandInsertAt);
+        refreshBlockList();
+        loadBlockToUi(m_selectedBlockIndex); // Insel: keine eigene Technologie
+        return;
     }
 
     m_program.addBlock(newBlock);
@@ -2494,7 +2636,7 @@ void ConversationalEditorDialog::onManageIslandsClicked() {
     
     m_editingIslandIndex = 0; // Edit the first island
     m_segmentEditorMode = SegmentEditorMode::PocketIsland;
-    m_segmentEditor->setContourOptions(static_cast<int>(CAM::ContourRole::Island), true);
+    m_segmentEditor->setContourOptions(static_cast<int>(CAM::MillingType::Island), true);
     
     m_segmentEditor->setSegments(b.pocketIslands[0]);
     m_masterStack->setCurrentIndex(1);
@@ -2521,7 +2663,7 @@ void ConversationalEditorDialog::showSegmentEditor() {
     // Z START / Z UNTEN von Segment 0 kommen aus dem Block; Folgesegmente übernehmen die Tiefe
     Geometry::Contour::applyStartDepth(segs, b.startZ, b.targetZ);
     m_segmentEditor->setTechnology(b.toolId, static_cast<int>(b.contourSide), b.feedRate, b.plungeFeedRate, b.spindleRpm, b.stepDown);
-    m_segmentEditor->setContourOptions(static_cast<int>(b.contourRole), b.contourZForAll);
+    m_segmentEditor->setContourOptions(static_cast<int>(b.effectiveMillingType()), b.contourZForAll);
     m_segmentEditor->setSegments(segs);
 
     // Zur Datensatz-Ansicht umschalten (Seite 1)

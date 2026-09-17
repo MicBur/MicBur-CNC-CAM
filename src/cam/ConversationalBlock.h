@@ -122,12 +122,18 @@ enum class ContourRole {
     Island = 2    // Insel der vorangehenden Tasche (bleibt stehen)
 };
 
+// Fräsart wie Hurco WinMax (Rahmen, Kreis, Kontur)
 enum class MillingType {
     OnContour = 0, // Auf Kontur (Keine Radiuskorrektur)
     Inside = 1,    // Innen
     Outside = 2,   // Außen
-    Pocket = 3     // Tasche (Voll ausräumen)
+    Pocket = 3,    // Taschengrenze: Innenraum ausräumen, folgende Inseln aussparen
+    Island = 4,    // Insel der Taschengrenze davor (Tiefe/Werkzeug aus der Taschengrenze)
+    Left = 5,      // Links der Konturrichtung (Gleichlauf) – nur Kontur
+    Right = 6      // Rechts der Konturrichtung (Gegenlauf) – nur Kontur
 };
+
+QString millingTypeName(MillingType type);
 
 enum class FrameStartSide {
     Bottom = 0,
@@ -296,6 +302,16 @@ public:
     double patternCenterY{0.0};
     bool patternMirrorX{true};        // Spiegeln an senkrechter Achse (X → -X)
     bool patternMirrorY{false};       // Spiegeln an waagrechter Achse (Y → -Y)
+
+    // Fräsart unabhängig vom Blocktyp (Kontur: aus Konturart und Bahnkorrektur)
+    [[nodiscard]] MillingType effectiveMillingType() const;
+    void setEffectiveMillingType(MillingType type);
+    [[nodiscard]] bool isPocketBoundary() const;  // Taschengrenze (Rahmen, Kreis oder Kontur)
+    [[nodiscard]] bool isPocketIsland() const;    // Insel (Rahmen, Kreis oder Kontur)
+    // Geschlossene Geometrie als Segmente (für Inseln der Taschengrenze davor)
+    [[nodiscard]] std::vector<Geometry::ContourSegment> islandSegments() const;
+    // Umriss eines Rahmen-/Kreis-/DXF-Blocks
+    [[nodiscard]] Geometry::Contour pocketBoundaryContour() const;
 
     // Bohrungen-Block aus einem älteren Einzelzyklus in Hurco-Bohrvorgänge umwandeln
     void convertLegacyDrillCycle();

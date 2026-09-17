@@ -47,8 +47,14 @@ Fallstricke:
   Synchron-Gewinde, Ausdrehen, Reiben – jeweils mit eigenem Werkzeug, Drehzahl, Eintauchvorschub, Bohr-Typ, Stufentiefe usw.).
   Die Lage der Bohrungen steht in den **direkt folgenden `DrillPositions`-Blöcken** (Einzeln, Teilkreis, Raster, Reihe, Bogen, Rahmen, Positionsliste).
   Leere `drillOps` = älterer Einzelzyklus (`drillCycle`, eigenes Bohrbild); `loadFromFile` wandelt alte Dateien automatisch um.
-- **Kontur-Startsegment**: Konturart `ContourRole` Kontur / Tasche / Insel. Inseln sind die direkt auf eine Kontur-Tasche folgenden Kontur-Blöcke mit Rolle Insel.
-  `contourZForAll`: Z UNTEN von Segment 0 gilt für alle Segmente (neue Blöcke: ja; ältere Dateien: Z je Segment).
+- **Fräsart wie Hurco** (`MillingType`) für Rahmen, Kreis (`BlockType::Pocket` mit `pocketShape`) und Kontur: Auf, Links (Gleichlauf),
+  Rechts (Gegenlauf, nur Kontur), Innen, Außen, **Taschengrenze**, **Insel**. Bei Konturen wird sie in `contourRole`/`contourSide`
+  abgebildet (`effectiveMillingType()` / `setEffectiveMillingType()`).
+- **Taschengrenze und Inseln**: Inseln sind eigene Blöcke (Rahmen, Kreis oder Kontur mit Fräsart Insel) **direkt nach** der Taschengrenze;
+  die Gruppe endet beim ersten Block, der keine Insel ist (`pocketBoundaryFor`). Inseln übernehmen Tiefe, Werkzeug und Technologie der
+  Taschengrenze und fräsen selbst nichts. „Auswärts“ ist mit Inseln nicht möglich (es wird einwärts gefräst). Alte Programme mit Inseln
+  im Taschenblock (`pocketIslands`) werden beim Laden in Insel-Blöcke umgewandelt (`upgradeEmbeddedIslands`).
+- `contourZForAll`: Z UNTEN von Segment 0 gilt für alle Segmente (neue Blöcke: ja; ältere Dateien: Z je Segment).
 - Schnittwerte kommen aus dem Block (Technologie-Reiter), nicht aus den Werkzeug-Standardwerten.
 - **Rückgängig/Wiederholen** im Arbeitsplan: `QUndoStack` mit vollständigen Programmständen; alle Änderungen einer Aktion in einer `UndoGroup`.
 

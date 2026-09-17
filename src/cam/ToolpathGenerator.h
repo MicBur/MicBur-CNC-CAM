@@ -12,7 +12,9 @@ namespace GeminiCNC::CAM {
 enum class ContourSide {
     Outside, // Werkzeug fährt außen an der Kontur
     Inside,  // Werkzeug fährt innen an der Kontur
-    OnLine   // Werkzeugmitte fährt direkt auf der Konturlinie
+    OnLine,  // Werkzeugmitte fährt direkt auf der Konturlinie
+    Left,    // links der programmierten Richtung (Hurco: Gleichlauf) – wird vor der Bahnberechnung aufgelöst
+    Right    // rechts der programmierten Richtung (Hurco: Gegenlauf)
 };
 
 struct FacingParams {

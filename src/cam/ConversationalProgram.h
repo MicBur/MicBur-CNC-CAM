@@ -25,6 +25,13 @@ public:
     void duplicateBlock(size_t index);
     [[nodiscard]] int nextBlockId() const;
 
+    // Taschengrenze, zu der die Insel an index gehört (-1 = keine). Die Inselgruppe folgt direkt auf
+    // die Taschengrenze und endet beim ersten Block, der keine Insel ist (Hurco WinMax).
+    [[nodiscard]] int pocketBoundaryFor(size_t index) const;
+
+    // Inseln älterer Programme (im Taschenblock gespeichert) als eigene Insel-Blöcke dahinter anlegen
+    void upgradeEmbeddedIslands();
+
     // Block mit den Daten der zugehörigen Folgeblöcke (Bohrpositionen, Inseln) für die Berechnung
     [[nodiscard]] ConversationalBlock resolvedBlock(size_t index) const;
 

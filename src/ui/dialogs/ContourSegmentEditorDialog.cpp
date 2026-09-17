@@ -87,10 +87,15 @@ void ContourSegmentEditorDialog::setupUi() {
 
     // Segment 0: Konturart und Tiefenregel (Hurco: Kontur, Tasche oder Insel)
     m_cmbContourRole = new QComboBox(this);
-    m_cmbContourRole->addItems({QStringLiteral("KONTUR"), QStringLiteral("TASCHE"), QStringLiteral("INSEL")});
-    connect(m_cmbContourRole, &QComboBox::currentIndexChanged, this, [this](int idx) {
+    // Fräsart wie Hurco WinMax; Daten = CAM::MillingType
+    const std::pair<const char*, int> millingTypes[] = {
+        {"AUF KONTUR", 0}, {"LINKS (GLEICHLAUF)", 5}, {"RECHTS (GEGENLAUF)", 6},
+        {"INNEN", 1}, {"AUSSEN", 2}, {"TASCHENGRENZE", 3}, {"INSEL", 4}};
+    for (const auto& [text, value] : millingTypes) m_cmbContourRole->addItem(QString::fromUtf8(text), value);
+    connect(m_cmbContourRole, &QComboBox::currentIndexChanged, this, [this]() {
         if (m_isLoading) return;
-        m_contourRole = std::clamp(idx, 0, 2);
+        m_millingType = m_cmbContourRole->currentData().toInt();
+        m_contourRole = m_millingType == 3 ? 1 : (m_millingType == 4 ? 2 : 0);
         applyContourOptions();
     });
     m_cmbZForAll = new QComboBox(this);
@@ -100,7 +105,7 @@ void ContourSegmentEditorDialog::setupUi() {
         m_zForAll = (idx == 0);
         applyContourOptions();
     });
-    leftLayout->addRow(new QLabel(QStringLiteral("KONTURART:")), m_cmbContourRole);
+    leftLayout->addRow(new QLabel(QStringLiteral("FRÄSART:")), m_cmbContourRole);
     leftLayout->addRow(new QLabel(QStringLiteral("Z FÜR ALLE:")), m_cmbZForAll);
     m_lblXCaption = new QLabel(QStringLiteral("X END:"));
     m_lblYCaption = new QLabel(QStringLiteral("Y END:"));
@@ -600,12 +605,14 @@ void ContourSegmentEditorDialog::onTechnologyEdited() {
                            m_spinFeed->value(), m_spinPlunge->value(), m_spinRpm->value(), m_spinPeckDepth->value());
 }
 
-void ContourSegmentEditorDialog::setContourOptions(int role, bool zForAll) {
+void ContourSegmentEditorDialog::setContourOptions(int millingType, bool zForAll) {
     const bool wasLoading = m_isLoading;
     m_isLoading = true;
-    m_contourRole = std::clamp(role, 0, 2);
+    m_millingType = std::clamp(millingType, 0, 6);
+    m_contourRole = m_millingType == 3 ? 1 : (m_millingType == 4 ? 2 : 0);
     m_zForAll = zForAll;
-    m_cmbContourRole->setCurrentIndex(m_contourRole);
+    const int idx = m_cmbContourRole->findData(m_millingType);
+    m_cmbContourRole->setCurrentIndex(idx >= 0 ? idx : 0);
     m_cmbZForAll->setCurrentIndex(m_zForAll ? 0 : 1);
     updateDepthFieldVisibility();
     m_isLoading = wasLoading;
@@ -616,14 +623,14 @@ void ContourSegmentEditorDialog::applyContourOptions() {
     if (!perSegmentDepth() && !m_segments.empty()) {
         for (size_t k = 1; k < m_segments.size(); ++k) m_segments[k].z = m_segments.front().z;
     }
-    emit contourOptionsChanged(m_contourRole, m_zForAll);
+    emit contourOptionsChanged(m_millingType, m_zForAll);
     loadStep(m_currentIndex);
     recompileContour();
 
     static const QStringList prompts = {
-        QStringLiteral("Kontur: Fräsbahn entlang der Kontur (auf / innen / außen)."),
-        QStringLiteral("Tasche: Innenraum wird ausgeräumt – nur Z START und Z UNTEN nötig."),
-        QStringLiteral("Insel: bleibt in der vorangehenden Tasche stehen – Tiefe und Werkzeug kommen aus der Tasche.")
+        QStringLiteral("Kontur: Fräsbahn entlang der Kontur (auf / links / rechts / innen / außen)."),
+        QStringLiteral("Taschengrenze: Innenraum wird ausgeräumt – nur Z START und Z UNTEN nötig."),
+        QStringLiteral("Insel: bleibt in der Taschengrenze davor stehen – Tiefe und Werkzeug kommen aus der Taschengrenze.")
     };
     emit promptChanged(prompts[m_contourRole]);
 }
@@ -641,7 +648,8 @@ void ContourSegmentEditorDialog::updateDepthFieldVisibility() {
     m_leftForm->setRowVisible(m_editLineZEnd, isStart ? !island : perSegmentDepth());
     if (m_arcForm) m_arcForm->setRowVisible(m_editArcZEnd, perSegmentDepth());
     if (m_techTabs) m_techTabs->setVisible(!island);
-    if (m_roughForm) m_roughForm->setRowVisible(m_cmbMillingType, profile);
+    if (m_roughForm) m_roughForm->setRowVisible(m_cmbMillingType, false);
+    (void)profile;
 }
 
 bool ContourSegmentEditorDialog::isArcStep(int index) const {

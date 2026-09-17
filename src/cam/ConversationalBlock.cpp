@@ -131,6 +131,86 @@ StlMillingStrategy stringToStlStrategy(const QString& str) {
 }
 
 // ═══════════════════════════════════════════════════════════
+// Fräsart, Taschengrenze und Inseln (Hurco WinMax)
+// ═══════════════════════════════════════════════════════════
+
+QString millingTypeName(MillingType type) {
+    switch (type) {
+        case MillingType::OnContour: return QStringLiteral("Auf Kontur");
+        case MillingType::Inside:    return QStringLiteral("Innen");
+        case MillingType::Outside:   return QStringLiteral("Außen");
+        case MillingType::Pocket:    return QStringLiteral("Taschengrenze");
+        case MillingType::Island:    return QStringLiteral("Insel");
+        case MillingType::Left:      return QStringLiteral("Links");
+        case MillingType::Right:     return QStringLiteral("Rechts");
+    }
+    return QStringLiteral("Auf Kontur");
+}
+
+MillingType ConversationalBlock::effectiveMillingType() const {
+    if (type != BlockType::Contour) return millingType;
+    if (contourRole == ContourRole::Pocket) return MillingType::Pocket;
+    if (contourRole == ContourRole::Island) return MillingType::Island;
+    switch (contourSide) {
+        case ContourSide::Inside: return MillingType::Inside;
+        case ContourSide::OnLine: return MillingType::OnContour;
+        case ContourSide::Left:   return MillingType::Left;
+        case ContourSide::Right:  return MillingType::Right;
+        default:                  return MillingType::Outside;
+    }
+}
+
+void ConversationalBlock::setEffectiveMillingType(MillingType value) {
+    millingType = value;
+    if (type != BlockType::Contour) return;
+    contourRole = ContourRole::Profile;
+    switch (value) {
+        case MillingType::Pocket:    contourRole = ContourRole::Pocket; break;
+        case MillingType::Island:    contourRole = ContourRole::Island; break;
+        case MillingType::Inside:    contourSide = ContourSide::Inside; break;
+        case MillingType::OnContour: contourSide = ContourSide::OnLine; break;
+        case MillingType::Left:      contourSide = ContourSide::Left; break;
+        case MillingType::Right:     contourSide = ContourSide::Right; break;
+        case MillingType::Outside:   contourSide = ContourSide::Outside; break;
+    }
+}
+
+bool ConversationalBlock::isPocketBoundary() const {
+    return (type == BlockType::Pocket || type == BlockType::Contour) && effectiveMillingType() == MillingType::Pocket;
+}
+
+bool ConversationalBlock::isPocketIsland() const {
+    return (type == BlockType::Pocket || type == BlockType::Contour) && effectiveMillingType() == MillingType::Island;
+}
+
+Geometry::Contour ConversationalBlock::pocketBoundaryContour() const {
+    if (pocketShape == PocketShape::Rectangle) {
+        return (pocketCornerR > 1e-6)
+            ? Geometry::Contour::createRoundedRectangle(posX + pocketWidthX * 0.5, posY + pocketDepthY * 0.5, pocketWidthX, pocketDepthY, pocketCornerR)
+            : Geometry::Contour::createRectangle(posX, posY, pocketWidthX, pocketDepthY);
+    }
+    if (pocketShape == PocketShape::Circle) {
+        return Geometry::Contour::createCircle(posX, posY, pocketRadius);
+    }
+    return contour.empty() ? Geometry::Contour::createRectangle(posX - 25, posY - 25, 50, 50) : contour;
+}
+
+std::vector<Geometry::ContourSegment> ConversationalBlock::islandSegments() const {
+    if (type == BlockType::Contour && !segments.empty()) return segments;
+
+    const Geometry::Contour outline = (type == BlockType::Contour) ? contour : pocketBoundaryContour();
+    std::vector<Geometry::ContourSegment> segs;
+    for (size_t n = 0; n < outline.points.size(); ++n) {
+        Geometry::ContourSegment seg;
+        seg.type = (n == 0) ? Geometry::ContourSegmentType::StartPoint : Geometry::ContourSegmentType::Line;
+        seg.x = outline.points[n].x;
+        seg.y = outline.points[n].y;
+        segs.push_back(seg);
+    }
+    return segs;
+}
+
+// ═══════════════════════════════════════════════════════════
 // Bohrvorgänge (Hurco WinMax Bohrungen-Datensatz)
 // ═══════════════════════════════════════════════════════════
 
@@ -471,12 +551,22 @@ Toolpath ConversationalBlock::generateToolpath(const Core::ToolDefinition& tool,
     };
 
     // Kontur: Schruppen mit Aufmaß, Schlichtgang auf Endmaß (volle Tiefe in einer Umrundung)
-    auto millContour = [&](const Geometry::Contour& c, ContourSide side, const std::vector<double>& profileZ = {}) {
+    auto millContour = [&](const Geometry::Contour& c, ContourSide requestedSide, const std::vector<double>& profileZ = {}) {
+        // Links/Rechts (Hurco): Seite aus dem Umlaufsinn, Links = Gleichlauf, Rechts = Gegenlauf
+        ContourSide side = requestedSide;
+        bool climb = (millingDirection == 0);
+        if (requestedSide == ContourSide::Left || requestedSide == ContourSide::Right) {
+            const bool left = requestedSide == ContourSide::Left;
+            const bool ccw = !c.isClockwise();
+            side = (left == ccw) ? ContourSide::Inside : ContourSide::Outside;
+            climb = left;
+        }
         const bool finishing = finishPass && side != ContourSide::OnLine;
         double deepest = targetZ;
         for (double z : profileZ) deepest = std::min(deepest, z);
 
         ContourParams rough = contourParams(side);
+        rough.climbMilling = climb;
         rough.vertexZ = profileZ;
         if (finishing) {
             const double floorAllowance = std::max(0.0, finishStepDown);
@@ -487,6 +577,7 @@ Toolpath ConversationalBlock::generateToolpath(const Core::ToolDefinition& tool,
         Toolpath result = ToolpathGenerator::generateContourMilling(c, cutTool, rough);
         if (finishing) {
             ContourParams fin = contourParams(side);
+            fin.climbMilling = climb;
             fin.vertexZ = profileZ;
             fin.stepDown = std::max(0.1, startZ - deepest);
             appendPath(result, ToolpathGenerator::generateContourMilling(c, finTool, fin), finTool.id);
@@ -507,7 +598,8 @@ Toolpath ConversationalBlock::generateToolpath(const Core::ToolDefinition& tool,
         pp.stepOverRatio = (cutTool.diameter > 0.0) ? (stepOver / cutTool.diameter) : 0.5;
         pp.finishAllowance = allowXY;
         pp.clearanceZ = clearanceZ;
-        pp.strategy = pocketStrategy;
+        // Hurco: auswärts (Spirale von innen) nur ohne Inseln – sonst einwärts (konturparallel)
+        pp.strategy = (pocketStrategy == 1 && !pocketIslandContours.empty()) ? 2 : pocketStrategy;
         pp.climbMilling = (millingDirection == 0);
         pp.entryType = approachType;
 
@@ -650,18 +742,11 @@ Toolpath ConversationalBlock::generateToolpath(const Core::ToolDefinition& tool,
         }
         tp.operationName = name;
     } else if (type == BlockType::Pocket) {
-        Geometry::Contour boundary;
-        if (pocketShape == PocketShape::Rectangle) {
-            boundary = (pocketCornerR > 1e-6)
-                ? Geometry::Contour::createRoundedRectangle(posX + pocketWidthX * 0.5, posY + pocketDepthY * 0.5, pocketWidthX, pocketDepthY, pocketCornerR)
-                : Geometry::Contour::createRectangle(posX, posY, pocketWidthX, pocketDepthY);
-        } else if (pocketShape == PocketShape::Circle) {
-            boundary = Geometry::Contour::createCircle(posX, posY, pocketRadius);
-        } else {
-            boundary = contour.empty() ? Geometry::Contour::createRectangle(posX - 25, posY - 25, 50, 50) : contour;
-        }
+        const Geometry::Contour boundary = pocketBoundaryContour();
 
-        if (millingType == MillingType::Pocket) {
+        if (millingType == MillingType::Island) {
+            // Insel: wird von der Taschengrenze davor ausgespart, eigener Block fräst nichts
+        } else if (millingType == MillingType::Pocket) {
             std::vector<Geometry::Contour> compiledIslands;
             for (const auto& islandSegs : pocketIslands) {
                 auto islandContour = Geometry::Contour::createFromSegments(islandSegs, true);

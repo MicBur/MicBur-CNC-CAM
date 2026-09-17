@@ -1140,6 +1140,111 @@ void testHurcoDrillingAndContourRoles() {
     std::cout << " -> PASSED" << std::endl;
 }
 
+void testHurcoPocketIslands() {
+    std::cout << "[TEST] Hurco: Taschengrenze mit Inseln aus Kreis und Kontur, Links/Rechts..." << std::endl;
+    auto tools = Core::ToolDefinition::createDefaultLibrary();
+    Core::BoundingBox stock({-20, -20, -25}, {90, 60, 0});
+    using ST = Geometry::ContourSegmentType;
+    auto rectSegs = [](double x0, double y0, double w, double h) {
+        std::vector<Geometry::ContourSegment> segs(5);
+        segs[0].type = ST::StartPoint; segs[0].x = x0;     segs[0].y = y0;
+        segs[1].type = ST::Line;       segs[1].x = x0 + w; segs[1].y = y0;
+        segs[2].type = ST::Line;       segs[2].x = x0 + w; segs[2].y = y0 + h;
+        segs[3].type = ST::Line;       segs[3].x = x0;     segs[3].y = y0 + h;
+        segs[4].type = ST::Line;       segs[4].x = x0;     segs[4].y = y0;
+        return segs;
+    };
+
+    // Rahmen als Taschengrenze (auswärts gewählt → mit Inseln einwärts)
+    CAM::ConversationalBlock frame(1, CAM::BlockType::Pocket, QStringLiteral("Rahmen"));
+    frame.pocketShape = CAM::PocketShape::Rectangle;
+    frame.posX = 0.0; frame.posY = 0.0; frame.pocketWidthX = 60.0; frame.pocketDepthY = 40.0; frame.pocketCornerR = 0.0;
+    frame.millingType = CAM::MillingType::Pocket;
+    frame.pocketStrategy = 1;
+    frame.startZ = 0.0; frame.targetZ = -3.0; frame.stepDown = 3.0; frame.stepOver = 3.0; frame.toolId = 1;
+
+    CAM::ConversationalBlock circleIsland(2, CAM::BlockType::Pocket, QStringLiteral("Kreis-Insel"));
+    circleIsland.pocketShape = CAM::PocketShape::Circle;
+    circleIsland.posX = 15.0; circleIsland.posY = 20.0; circleIsland.pocketRadius = 5.0;
+    circleIsland.millingType = CAM::MillingType::Island;
+    circleIsland.targetZ = -20.0; // eigene Tiefe wird nicht verwendet
+
+    CAM::ConversationalBlock contourIsland(3, CAM::BlockType::Contour, QStringLiteral("Kontur-Insel"));
+    contourIsland.segments = rectSegs(32.0, 14.0, 13.0, 12.0);
+    contourIsland.setEffectiveMillingType(CAM::MillingType::Island);
+
+    CAM::ConversationalBlock nc(4, CAM::BlockType::RawNC, QStringLiteral("NC"));
+    CAM::ConversationalBlock orphan(5, CAM::BlockType::Pocket, QStringLiteral("Insel nach NC"));
+    orphan.pocketShape = CAM::PocketShape::Circle;
+    orphan.posX = 52.0; orphan.posY = 20.0; orphan.pocketRadius = 3.0;
+    orphan.millingType = CAM::MillingType::Island;
+
+    CAM::ConversationalProgram prog;
+    for (const auto& b : {frame, circleIsland, contourIsland, nc, orphan}) prog.addBlock(b);
+    require(prog.pocketBoundaryFor(1) == 0 && prog.pocketBoundaryFor(2) == 0, "Inseln direkt nach der Taschengrenze gehören zu ihr");
+    require(prog.pocketBoundaryFor(4) == -1, "Insel nach einem anderen Block gehört zu keiner Taschengrenze");
+    require(prog.resolvedBlock(0).pocketIslands.size() == 2, "Taschengrenze muss genau zwei Inseln haben");
+    require(circleIsland.generateToolpath(tools.first(), tools.first(), stock).empty()
+            && contourIsland.generateToolpath(tools.first(), tools.first(), stock).empty(), "Insel-Blöcke fräsen selbst nicht");
+
+    const auto tp = prog.generateFullToolpath(tools, stock);
+    bool nearOrphan = false;
+    int floorSegments = 0;
+    for (const auto& s : tp.segments) {
+        require(s.endPos.z > -3.001, "Inseln dürfen keine eigene Tiefe haben");
+        if (s.motion == CAM::MotionType::Rapid || std::abs(s.startPos.z + 3.0) > 1e-6 || std::abs(s.endPos.z + 3.0) > 1e-6) continue;
+        ++floorSegments;
+        for (int k = 0; k <= 20; ++k) {
+            const double t = k / 20.0;
+            const double x = s.startPos.x + (s.endPos.x - s.startPos.x) * t;
+            const double y = s.startPos.y + (s.endPos.y - s.startPos.y) * t;
+            require(std::hypot(x - 15.0, y - 20.0) >= 7.9, "Taschenbahn fräst in die Kreis-Insel");
+            const double dx = std::max({32.0 - x, 0.0, x - 45.0});
+            const double dy = std::max({14.0 - y, 0.0, y - 26.0});
+            require(std::hypot(dx, dy) >= 2.9, "Taschenbahn fräst in die Kontur-Insel");
+            if (std::hypot(x - 52.0, y - 20.0) < 5.5) nearOrphan = true; // ausgespart wäre >= 6 mm (Insel R3 + Fräser R3)
+        }
+    }
+    require(floorSegments > 10, "Taschengrenze wird nicht ausgeräumt");
+    require(nearOrphan, "Insel nach einem anderen Block darf nicht ausgespart werden");
+
+    // Speichern: Fräsart Insel; ältere Programme mit Inseln im Taschenblock werden umgewandelt
+    require(CAM::ConversationalBlock::fromJson(circleIsland.toJson()).isPocketIsland()
+            && CAM::ConversationalBlock::fromJson(contourIsland.toJson()).isPocketIsland(), "Fräsart Insel nicht gespeichert");
+    CAM::ConversationalBlock legacyPocket = frame;
+    legacyPocket.pocketIslands = {rectSegs(20.0, 10.0, 10.0, 10.0)};
+    CAM::ConversationalProgram legacyProg;
+    legacyProg.addBlock(legacyPocket);
+    const QString path = QDir::temp().filePath(QStringLiteral("gemini_legacy_islands.gprog"));
+    require(legacyProg.saveToFile(path), "Testprogramm nicht gespeichert");
+    const auto upgraded = CAM::ConversationalProgram::loadFromFile(path);
+    QFile::remove(path);
+    require(upgraded.size() == 2 && upgraded[0].pocketIslands.empty() && upgraded[1].isPocketIsland()
+            && upgraded.pocketBoundaryFor(1) == 0, "Eingebettete Insel muss ein eigener Insel-Block werden");
+
+    // Links / Rechts einer gegen den Uhrzeigersinn programmierten Kontur
+    CAM::ConversationalBlock profile(6, CAM::BlockType::Contour, QStringLiteral("Kontur"));
+    profile.segments = rectSegs(0.0, 0.0, 40.0, 20.0);
+    profile.startZ = 0.0; profile.targetZ = -2.0; profile.stepDown = 2.0; profile.leadType = 0;
+    auto extentX = [&](CAM::MillingType type) {
+        profile.setEffectiveMillingType(type);
+        require(profile.effectiveMillingType() == type, "Fräsart der Kontur nicht übernommen");
+        double minX = 1e9, maxX = -1e9;
+        for (const auto& s : profile.generateToolpath(tools.first(), tools.first(), stock).segments) {
+            if (s.motion == CAM::MotionType::Rapid || std::abs(s.endPos.z + 2.0) > 1e-6) continue;
+            minX = std::min(minX, s.endPos.x);
+            maxX = std::max(maxX, s.endPos.x);
+        }
+        return std::make_pair(minX, maxX);
+    };
+    const auto left = extentX(CAM::MillingType::Left);
+    const auto right = extentX(CAM::MillingType::Right);
+    require(left.first > 2.0 && left.second < 38.0, "Links (gegen Uhrzeigersinn) muss innen fräsen");
+    require(right.first < -2.0 && right.second > 42.0, "Rechts (gegen Uhrzeigersinn) muss außen fräsen");
+
+    std::cout << " -> PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "=== Running CAM & Collision Test Suite ===" << std::endl;
     testToolpathGenerationFacing();
@@ -1158,6 +1263,7 @@ int main() {
     testContourArcsAndSegmentDepth();
     testToolMarksAndShading();
     testHurcoDrillingAndContourRoles();
+    testHurcoPocketIslands();
     std::cout << "=== All CAM Tests PASSED ===" << std::endl;
     return 0;
 }

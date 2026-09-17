@@ -380,6 +380,38 @@ void testEditorHurcoDrilling() {
     std::cout << "testEditorHurcoDrilling PASSED!" << std::endl;
 }
 
+void testEditorHurcoIslands() {
+    std::cout << "Running testEditorHurcoIslands..." << std::endl;
+    UI::ConversationalEditorDialog editor;
+    const auto& prog = editor.program();
+    const size_t n = prog.size();
+
+    editor.onAddPocketShapeClicked(CAM::PocketShape::Rectangle);
+    check(prog.size() == n + 1 && prog[n].type == CAM::BlockType::Pocket && prog[n].isPocketBoundary()
+          && prog[n].pocketShape == CAM::PocketShape::Rectangle, "+ Rahmen: Taschengrenze erwartet");
+
+    editor.onAddPocketShapeClicked(CAM::PocketShape::Circle);
+    editor.onAddBlockClicked(CAM::BlockType::Contour);
+    check(prog.size() == n + 3 && prog[n + 1].isPocketIsland() && prog[n + 1].pocketShape == CAM::PocketShape::Circle
+          && prog[n + 2].isPocketIsland() && prog.pocketBoundaryFor(n + 2) == static_cast<int>(n),
+          "Nach der Taschengrenze: Kreis und Kontur als Inseln");
+    check(std::abs(prog[n + 1].targetZ - prog[n].targetZ) < 1e-9, "Insel übernimmt die Tiefe der Taschengrenze");
+
+    // Weitere Insel bei gewählter Taschengrenze: am Ende der Inselgruppe einfügen
+    editor.onAddBlockClicked(CAM::BlockType::Facing);
+    editor.onBlockSelectionChanged(static_cast<int>(n));
+    editor.onAddPocketShapeClicked(CAM::PocketShape::Circle);
+    check(prog.size() == n + 5 && prog[n + 3].isPocketIsland() && prog[n + 4].type == CAM::BlockType::Facing,
+          "Insel muss in die Inselgruppe eingefügt werden");
+
+    // Ohne Taschengrenze davor: Kreis ist wieder eine Taschengrenze
+    editor.onBlockSelectionChanged(static_cast<int>(n + 4));
+    editor.onAddPocketShapeClicked(CAM::PocketShape::Circle);
+    check(prog[prog.size() - 1].isPocketBoundary(), "Kreis nach Planen: Taschengrenze erwartet");
+
+    std::cout << "testEditorHurcoIslands PASSED!" << std::endl;
+}
+
 int main(int argc, char* argv[]) {
     qputenv("QT_PLUGIN_PATH", "G:/Qt/6.12.0/mingw_64/plugins");
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -414,6 +446,8 @@ int main(int argc, char* argv[]) {
     testEditorUndoRedo();
     std::cout << "[10/10] Starting testEditorHurcoDrilling..." << std::endl << std::flush;
     testEditorHurcoDrilling();
+    std::cout << "[11/11] Starting testEditorHurcoIslands..." << std::endl << std::flush;
+    testEditorHurcoIslands();
 
     std::cout << "=== All WinMax Tests PASSED Successfully! ===" << std::endl << std::flush;
     return 0;

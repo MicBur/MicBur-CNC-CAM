@@ -571,11 +571,11 @@ void MainWindow::onWinMaxSoftkeyTriggered(SoftkeyMenu menu, int fKeyNumber, cons
 
     // ── Bearbeitungsblöcke hinzufügen ──
     else if (actionKey == "prog_frame") {
-        m_pageConversational->onAddBlockClicked(CAM::BlockType::Pocket);
+        m_pageConversational->onAddPocketShapeClicked(CAM::PocketShape::Rectangle);
         m_dialogStack->setCurrentPage(DialogPage::Programming);
         m_winmaxSoftkeys->setMenu(SoftkeyMenu::BlockEdit);
     } else if (actionKey == "prog_circle") {
-        m_pageConversational->onAddBlockClicked(CAM::BlockType::Pocket);
+        m_pageConversational->onAddPocketShapeClicked(CAM::PocketShape::Circle);
         m_dialogStack->setCurrentPage(DialogPage::Programming);
         m_winmaxSoftkeys->setMenu(SoftkeyMenu::BlockEdit);
     } else if (actionKey == "prog_face") {

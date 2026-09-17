@@ -41,8 +41,9 @@ public:
     // Werkzeugauswahl aus der Bibliothek und Technologie des Blocks (Werkzeug, Fräsart, Schnittwerte)
     void setToolLibrary(const QList<Core::ToolDefinition>& tools);
     void setTechnology(int toolId, int contourSide, double feed, double plunge, double rpm, double stepDown);
-    // Konturart (0 = Kontur, 1 = Tasche, 2 = Insel) und ob Z UNTEN von Segment 0 für alle Segmente gilt
-    void setContourOptions(int role, bool zForAll);
+    // Fräsart (CAM::MillingType: 0 Auf, 1 Innen, 2 Außen, 3 Taschengrenze, 4 Insel, 5 Links, 6 Rechts)
+    // und ob Z UNTEN von Segment 0 für alle Segmente gilt
+    void setContourOptions(int millingType, bool zForAll);
 
     // Navigation & Softkey-Aktionen (F1..F8)
     void navigateNext();
@@ -61,7 +62,7 @@ signals:
     void accepted();
     // contourSide: 0 = Außen, 1 = Innen, 2 = Auf Kontur (CAM::ContourSide)
     void technologyChanged(int toolId, int contourSide, double feed, double plunge, double rpm, double stepDown);
-    void contourOptionsChanged(int role, bool zForAll);
+    void contourOptionsChanged(int millingType, bool zForAll);
 
 private slots:
     void onInputEdited();
@@ -82,7 +83,8 @@ private:
     void updateDepthFieldVisibility();   // nur die nötigen Tiefenfelder abfragen
     [[nodiscard]] bool perSegmentDepth() const { return m_contourRole == 0 && !m_zForAll; }
 
-    int m_contourRole{0};
+    int m_millingType{2};   // Außen
+    int m_contourRole{0};   // 0 = Kontur, 1 = Taschengrenze, 2 = Insel (aus m_millingType)
     bool m_zForAll{false};
     QComboBox* m_cmbContourRole{nullptr};
     QComboBox* m_cmbZForAll{nullptr};
