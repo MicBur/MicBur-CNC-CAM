@@ -316,16 +316,21 @@ Toolpath ToolpathGenerator::generateContourMilling(const Geometry::Contour& cont
     } else if (params.side == ContourSide::Inside) {
         offsetDist = contour.isClockwise() ? r : -r;
     }
+    std::vector<size_t> sourceIndex;
     const Geometry::Contour pathContour = (params.side != ContourSide::OnLine)
-                                          ? contour.createOffset(offsetDist)
+                                          ? contour.createOffset(offsetDist, &sourceIndex)
                                           : contour;
+    if (params.side == ContourSide::OnLine) {
+        for (size_t k = 0; k < contour.points.size(); ++k) sourceIndex.push_back(k);
+    }
 
-    // Punkte mit Tiefenprofil (nur wenn es zur Konturpunktzahl passt, sonst überall targetZ)
-    const bool hasProfile = !params.vertexZ.empty() && params.vertexZ.size() == pathContour.points.size();
+    // Punkte mit Tiefenprofil (Tiefe des zugehörigen Konturpunkts, sonst überall targetZ)
+    const bool hasProfile = !params.vertexZ.empty() && params.vertexZ.size() == contour.points.size()
+                         && sourceIndex.size() == pathContour.points.size();
     Polyline path;
     for (size_t k = 0; k < pathContour.points.size(); ++k) {
         const P2 q{pathContour.points[k].x, pathContour.points[k].y};
-        const double qz = hasProfile ? params.vertexZ[k] : params.targetZ;
+        const double qz = hasProfile ? params.vertexZ[sourceIndex[k]] : params.targetZ;
         if (path.pts.empty() || len(sub(q, path.pts.back())) > 1e-7) {
             path.pts.push_back(q);
             path.z.push_back(qz);

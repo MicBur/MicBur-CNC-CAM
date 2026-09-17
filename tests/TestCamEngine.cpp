@@ -1245,6 +1245,71 @@ void testHurcoPocketIslands() {
     std::cout << " -> PASSED" << std::endl;
 }
 
+void testOpenContourOffset() {
+    std::cout << "[TEST] Offene Kontur mit Bogen: Bahnkorrektur ohne Schließkante..." << std::endl;
+    using ST = Geometry::ContourSegmentType;
+    auto tools = Core::ToolDefinition::createDefaultLibrary();
+    const Core::BoundingBox stock({-100, -20, -40}, {20, 60, 0});
+
+    // Gerade nach links bis (-65|25), dann Viertelbogen GUZS um (-65|35) nach (-55|35) – offen
+    std::vector<Geometry::ContourSegment> segs(3);
+    segs[0].type = ST::StartPoint; segs[0].x = -20.0; segs[0].y = 25.0;
+    segs[1].type = ST::Line;       segs[1].x = -65.0; segs[1].y = 25.0;
+    segs[2].type = ST::ArcCCW;     segs[2].x = -55.0; segs[2].y = 35.0;
+    segs[2].hasCenter = true; segs[2].centerX = -65.0; segs[2].centerY = 35.0; segs[2].radius = 10.0;
+    for (auto& s : segs) s.z = -3.0;
+
+    const auto contour = Geometry::Contour::createFromSegments(segs, false);
+    require(!contour.isClosed && contour.points.size() > 4, "Offene Kontur erwartet");
+    const auto& last = contour.points.back();
+    require(std::abs(last.x + 55.0) < 1e-9 && std::abs(last.y - 35.0) < 1e-9, "Bogen muss in (-55|35) enden");
+
+    // Abstand eines Punkts zur programmierten (offenen) Kontur
+    auto distToContour = [&contour](double x, double y) {
+        double best = 1e9;
+        for (size_t k = 0; k + 1 < contour.points.size(); ++k) {
+            const auto& a = contour.points[k];
+            const auto& b = contour.points[k + 1];
+            const double ex = b.x - a.x, ey = b.y - a.y;
+            const double l2 = ex * ex + ey * ey;
+            const double t = l2 > 1e-12 ? std::clamp(((x - a.x) * ex + (y - a.y) * ey) / l2, 0.0, 1.0) : 0.0;
+            best = std::min(best, std::hypot(x - (a.x + t * ex), y - (a.y + t * ey)));
+        }
+        return best;
+    };
+
+    for (const auto side : {CAM::MillingType::Outside, CAM::MillingType::Inside, CAM::MillingType::Left, CAM::MillingType::Right}) {
+        CAM::ConversationalBlock block(1, CAM::BlockType::Contour, QStringLiteral("offen"));
+        block.segments = segs;
+        block.contour = contour;
+        block.startZ = 0.0; block.targetZ = -3.0; block.stepDown = 3.0; block.leadType = 0;
+        block.contourZForAll = true;
+        block.setEffectiveMillingType(side);
+
+        const auto offset = contour.createOffset(3.0);
+        require(std::hypot(offset.points.front().x - (-20.0), offset.points.front().y - 25.0) < 3.0 + 1e-6
+                && std::hypot(offset.points.back().x - (-55.0), offset.points.back().y - 35.0) < 3.0 + 1e-6,
+                "Offset einer offenen Kontur: Endpunkte dürfen nur um den Abstand verschoben werden");
+
+        double lastX = 0.0, lastY = 0.0;
+        bool any = false;
+        for (const auto& s : block.generateToolpath(tools.first(), tools.first(), stock).segments) {
+            if (s.motion == CAM::MotionType::Rapid || std::abs(s.endPos.z + 3.0) > 1e-6) continue;
+            // Außenseite der Kehre: überall im Fräserradius. Innen passt der Ø6-Fräser nicht zwischen Gerade und Bogen.
+            if (side == CAM::MillingType::Outside) {
+                require(std::abs(distToContour(s.endPos.x, s.endPos.y) - 3.0) < 0.25,
+                        "Fräsbahn einer offenen Kontur muss im Abstand des Fräserradius bleiben");
+            }
+            lastX = s.endPos.x;
+            lastY = s.endPos.y;
+            any = true;
+        }
+        require(any, "Keine Fräsbahn für die offene Kontur");
+        require(std::hypot(lastX + 55.0, lastY - 35.0) < 3.0 + 0.05, "Fräsbahn muss am Bogenende (-55|35) enden");
+    }
+    std::cout << " -> PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "=== Running CAM & Collision Test Suite ===" << std::endl;
     testToolpathGenerationFacing();
@@ -1264,6 +1329,7 @@ int main() {
     testToolMarksAndShading();
     testHurcoDrillingAndContourRoles();
     testHurcoPocketIslands();
+    testOpenContourOffset();
     std::cout << "=== All CAM Tests PASSED ===" << std::endl;
     return 0;
 }

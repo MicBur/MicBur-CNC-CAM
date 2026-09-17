@@ -73,6 +73,8 @@ public:
      * @brief Berechnet eine parallele Offset-Kontur (Fräserradiuskorrektur innen/außen).
      */
     [[nodiscard]] Contour createOffset(double offsetDistance) const;
+    // sourceIndex: je Ergebnispunkt der Index des Konturpunkts (Außenecken/Kehren erhalten Bögen mit mehreren Punkten)
+    [[nodiscard]] Contour createOffset(double offsetDistance, std::vector<size_t>* sourceIndex) const;
 
     // Erzeugt eine geschlossene Rechteck-Kontur
     [[nodiscard]] static Contour createRectangle(double minX, double minY, double widthX, double heightY);

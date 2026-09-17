@@ -72,52 +72,115 @@ Core::BoundingBox Contour::getBoundingBox(double zMin, double zMax) const {
 }
 
 Contour Contour::createOffset(double offsetDistance) const {
+    return createOffset(offsetDistance, nullptr);
+}
+
+Contour Contour::createOffset(double offsetDistance, std::vector<size_t>* sourceIndex) const {
     Contour out;
     out.isClosed = this->isClosed;
     out.layerName = this->layerName;
+    if (sourceIndex) sourceIndex->clear();
 
     if (points.size() < 2) {
+        if (sourceIndex) {
+            for (size_t i = 0; i < points.size(); ++i) sourceIndex->push_back(i);
+        }
         return *this;
     }
 
     const size_t n = points.size();
-    out.points.reserve(n);
+    const bool closed = this->isClosed;
+    const double d = offsetDistance;
+    const double absD = std::abs(d);
+    const double side = d >= 0.0 ? 1.0 : -1.0;
+    out.points.reserve(n + n / 2);
 
-    // Kanten-Normalen berechnen
-    std::vector<std::pair<double, double>> edgeNormals(n);
+    auto add = [&](double x, double y, size_t src) {
+        out.addPoint(x, y);
+        if (sourceIndex) sourceIndex->push_back(src);
+    };
+
+    // Kantenrichtungen und Normalen (rechts der Richtung); offene Kontur ohne Schließkante
+    struct Edge { double dx, dy, nx, ny; bool valid; };
+    std::vector<Edge> edges(n, Edge{0.0, 0.0, 0.0, 0.0, false});
     for (size_t i = 0; i < n; ++i) {
-        size_t nextIdx = (i + 1) % n;
-        double dx = points[nextIdx].x - points[i].x;
-        double dy = points[nextIdx].y - points[i].y;
-        double len = std::sqrt(dx * dx + dy * dy);
-        if (len > 1e-7) {
-            // Normalvektor senkrecht nach rechts (bei CCW nach außen)
-            edgeNormals[i] = {dy / len, -dx / len};
-        } else {
-            edgeNormals[i] = {0.0, 0.0};
-        }
+        if (!closed && i + 1 == n) break;
+        const size_t next = (i + 1) % n;
+        const double dx = points[next].x - points[i].x;
+        const double dy = points[next].y - points[i].y;
+        const double len = std::hypot(dx, dy);
+        if (len > 1e-9) edges[i] = Edge{dx / len, dy / len, dy / len, -dx / len, true};
     }
+    // Nullkanten (doppelte Punkte) übernehmen die Nachbarkante
+    auto edgeBefore = [&](size_t i) -> const Edge* {
+        for (size_t k = 1; k <= n; ++k) {
+            if (!closed && k > i) return nullptr;
+            const size_t idx = (i + n - k) % n;
+            if (edges[idx].valid) return &edges[idx];
+        }
+        return nullptr;
+    };
+    auto edgeFrom = [&](size_t i) -> const Edge* {
+        for (size_t k = 0; k < n; ++k) {
+            const size_t idx = (i + k) % n;
+            if (!closed && idx < i) return nullptr;
+            if (edges[idx].valid) return &edges[idx];
+        }
+        return nullptr;
+    };
 
-    // Für jeden Scheitelpunkt den gemittelten Normalenvektor berechnen
+    constexpr double kPi = 3.14159265358979323846;
     for (size_t i = 0; i < n; ++i) {
-        size_t prevIdx = (i + n - 1) % n;
-        double nx = edgeNormals[prevIdx].first + edgeNormals[i].first;
-        double ny = edgeNormals[prevIdx].second + edgeNormals[i].second;
-        double len = std::sqrt(nx * nx + ny * ny);
-
-        if (len > 1e-7) {
-            nx /= len;
-            ny /= len;
+        const double px = points[i].x;
+        const double py = points[i].y;
+        const Edge* in = edgeBefore(i);
+        const Edge* outEdge = edgeFrom(i);
+        if (!in && !outEdge) {
+            add(px, py, i);
+            continue;
+        }
+        if (!in || !outEdge) {
+            // Anfang/Ende einer offenen Kontur: nur die eigene Kante
+            const Edge* e = in ? in : outEdge;
+            add(px + e->nx * d, py + e->ny * d, i);
+            continue;
         }
 
-        // Skalierung für Miter-Ecken begrenzen
-        double dot = edgeNormals[i].first * nx + edgeNormals[i].second * ny;
-        double miterLimit = (dot > 0.3) ? (1.0 / dot) : 2.0;
-        if (miterLimit > 3.0) miterLimit = 3.0;
+        // Versatzrichtungen auf der gewählten Seite
+        const double s1x = in->nx * side, s1y = in->ny * side;
+        const double s2x = outEdge->nx * side, s2y = outEdge->ny * side;
+        const double a1 = std::atan2(s1y, s1x);
+        double delta = std::atan2(s2y, s2x) - a1;
+        while (delta > kPi) delta -= 2.0 * kPi;
+        while (delta <= -kPi) delta += 2.0 * kPi;
 
-        double ox = points[i].x + nx * offsetDistance * miterLimit;
-        double oy = points[i].y + ny * offsetDistance * miterLimit;
-        out.addPoint(ox, oy);
+        if (std::abs(delta) < 1e-6) {
+            add(px + s1x * absD, py + s1y * absD, i); // gerade weiter
+            continue;
+        }
+
+        const double mid = a1 + 0.5 * delta;
+        const bool hairpin = std::abs(delta) > kPi - 1e-3;
+        const bool outer = hairpin || (std::cos(mid) * in->dx + std::sin(mid) * in->dy) > 0.0;
+
+        if (!outer) {
+            // Innenecke: Schnittpunkt der beiden versetzten Kanten (begrenzt)
+            const double half = 0.5 * delta;
+            const double scale = std::min(1.0 / std::max(std::cos(half), 1e-6), 3.0);
+            add(px + std::cos(mid) * absD * scale, py + std::sin(mid) * absD * scale, i);
+            continue;
+        }
+
+        // Außenecke oder Kehre: Bogen um den Konturpunkt (wie Radiuskorrektur), über die Vorwärtsrichtung
+        if (hairpin) {
+            const double viaForward = std::cos(a1 + 0.5 * kPi) * in->dx + std::sin(a1 + 0.5 * kPi) * in->dy;
+            delta = viaForward >= 0.0 ? kPi : -kPi;
+        }
+        const int steps = std::max(1, static_cast<int>(std::ceil(std::abs(delta) / (kPi / 18.0))));
+        for (int k = 0; k <= steps; ++k) {
+            const double a = a1 + delta * k / steps;
+            add(px + std::cos(a) * absD, py + std::sin(a) * absD, i);
+        }
     }
 
     return out;
