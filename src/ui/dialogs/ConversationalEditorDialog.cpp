@@ -1,5 +1,6 @@
 #include "ConversationalEditorDialog.h"
 #include "ContourSegmentEditorDialog.h"
+#include "FeaturePreviewDialog.h"
 #include "cam/CollisionDetector.h"
 #include "geometry/StlLoader.h"
 
@@ -1348,6 +1349,44 @@ void ConversationalEditorDialog::setupUi() {
     btnCalcProg->setStyleSheet("padding: 10px; font-weight: bold; background-color: #DD6B20; color: white; border-radius: 4px; font-size: 13px;");
     connect(btnCalcProg, &QPushButton::clicked, this, &ConversationalEditorDialog::onCalculateProgramClicked);
     scrollLayout->addWidget(btnCalcProg);
+
+    // Feature-Analyse Button (STL → Automatische Bearbeitungsblöcke)
+    auto* btnAnalyzeStl = new QPushButton(QStringLiteral("🔍 STL analysieren → Auto-Blöcke"), this);
+    btnAnalyzeStl->setStyleSheet("padding: 10px; font-weight: bold; background-color: #6B46C1; color: white; border-radius: 4px; font-size: 13px;");
+    connect(btnAnalyzeStl, &QPushButton::clicked, this, [this]() {
+        if (m_stockMesh.vertices.empty()) {
+            QMessageBox::warning(this, QStringLiteral("Kein Rohteil"),
+                QStringLiteral("Bitte zuerst ein Rohteil im Setup-Dialog definieren."));
+            return;
+        }
+        if (m_partMesh.vertices.empty()) {
+            QMessageBox::warning(this, QStringLiteral("Kein Fertigteil"),
+                QStringLiteral("Bitte zuerst ein Fertigteil-STL im Setup-Dialog laden."));
+            return;
+        }
+        if (m_toolLibrary.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Keine Werkzeuge"),
+                QStringLiteral("Bitte zuerst Werkzeuge im Werkzeug-Manager anlegen."));
+            return;
+        }
+
+        auto* dialog = new FeaturePreviewDialog(this);
+        connect(dialog, &FeaturePreviewDialog::programGenerated, this,
+            [this](const CAM::ConversationalProgram& prog) {
+                recordUndoState(QStringLiteral("STL Feature-Analyse"));
+                m_program = prog;
+                refreshBlockList();
+                if (m_program.size() > 0) {
+                    m_blockList->setCurrentRow(0);
+                    onBlockSelectionChanged(0);
+                }
+                onCalculateProgramClicked();
+            });
+        dialog->runAnalysis(m_stockMesh, m_partMesh, m_toolLibrary);
+        dialog->exec();
+        dialog->deleteLater();
+    });
+    scrollLayout->addWidget(btnAnalyzeStl);
 
     auto* progFileLayout = new QHBoxLayout();
     auto* btnSaveProg = new QPushButton(QStringLiteral("💾 Programm speichern (.gprog)"), this);

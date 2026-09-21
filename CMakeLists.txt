@@ -95,11 +95,18 @@ add_library(cnc_cam STATIC
     src/cam/HurcoPostProcessor.cpp
     src/cam/HeidenhainPostProcessor.h
     src/cam/HeidenhainPostProcessor.cpp
+    src/cam/MeshSlicer.h
+    src/cam/MeshSlicer.cpp
+    src/cam/FeatureRecognizer.h
+    src/cam/FeatureRecognizer.cpp
+    src/cam/AutoProgramGenerator.h
+    src/cam/AutoProgramGenerator.cpp
 )
 target_link_libraries(cnc_cam PUBLIC
     cnc_core
     cnc_geometry
     Qt6::Core
+    Qt6::Gui
 )
 
 # Simulation Engine Module
@@ -162,6 +169,8 @@ add_library(cnc_ui STATIC
     src/ui/dialogs/HardwareDialog.cpp
     src/ui/dialogs/ContourSegmentEditorDialog.h
     src/ui/dialogs/ContourSegmentEditorDialog.cpp
+    src/ui/dialogs/FeaturePreviewDialog.h
+    src/ui/dialogs/FeaturePreviewDialog.cpp
     src/ui/winmax/WinMaxHeaderBar.h
     src/ui/winmax/WinMaxHeaderBar.cpp
     src/ui/winmax/WinMaxSoftkeyBar.h
