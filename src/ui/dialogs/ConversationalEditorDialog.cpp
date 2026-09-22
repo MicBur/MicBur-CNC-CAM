@@ -499,7 +499,7 @@ void ConversationalEditorDialog::setupUi() {
     lPocket->addRow(QStringLiteral("Startkante:"), m_cmbStartSide);
 
     m_cmbPocketStrategy = new QComboBox(this);
-    m_cmbPocketStrategy->addItems({QStringLiteral("Zickzack"), QStringLiteral("Auswärts (Spirale von innen)"), QStringLiteral("Einwärts (konturparallel)")});
+    m_cmbPocketStrategy->addItems({QStringLiteral("Zickzack"), QStringLiteral("Auswärts (Spirale von innen)"), QStringLiteral("Einwärts (konturparallel)"), QStringLiteral("Trochoidal")});
     connect(m_cmbPocketStrategy, &QComboBox::currentIndexChanged, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
     lPocket->addRow(QStringLiteral("Räumstrategie:"), m_cmbPocketStrategy);
 
@@ -930,6 +930,10 @@ void ConversationalEditorDialog::setupUi() {
     slotRepeatRow->addWidget(new QLabel("Anzahl:")); slotRepeatRow->addWidget(m_spinSlotCount);
     slotRepeatRow->addWidget(new QLabel("Abstand:")); slotRepeatRow->addWidget(m_spinSlotSpacing);
     lSlot->addRow(QStringLiteral("Wiederholung:"), slotRepeatRow);
+
+    m_chkTrochoidal = new QCheckBox(QStringLiteral("Trochoidales Fräsen (geringer ae, hoher Vorschub)"), this);
+    connect(m_chkTrochoidal, &QCheckBox::toggled, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
+    lSlot->addRow(QString(), m_chkTrochoidal);
 
     m_stackParams->addWidget(pageSlot); // Index 5
 
@@ -1839,6 +1843,7 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
             m_spinSlotCornerR->setValue(b.slotCornerR);
             m_spinSlotCount->setValue(b.slotCount);
             m_spinSlotSpacing->setValue(b.slotSpacing);
+            m_chkTrochoidal->setChecked(b.useTrochoidal);
             break;
         case CAM::BlockType::HelixThread:
             m_stackParams->setCurrentIndex(6);
@@ -2030,6 +2035,7 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
         b.slotCornerR = m_spinSlotCornerR->value();
         b.slotCount = m_spinSlotCount->value();
         b.slotSpacing = m_spinSlotSpacing->value();
+        b.useTrochoidal = m_chkTrochoidal->isChecked();
     } else if (b.type == CAM::BlockType::HelixThread) {
         b.helixDiameter = m_spinHelixDia->value();
         b.helixPitch = m_spinHelixPitch->value();

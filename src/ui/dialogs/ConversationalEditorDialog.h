@@ -234,6 +234,7 @@ private:
     QDoubleSpinBox* m_spinSlotCornerR{nullptr};
     QSpinBox* m_spinSlotCount{nullptr};
     QDoubleSpinBox* m_spinSlotSpacing{nullptr};
+    QCheckBox* m_chkTrochoidal{nullptr};  // Trochoidales Fräsen (Nut + Tasche)
 
     // ─── Helix / Gewinde Seite ───
     QDoubleSpinBox* m_spinHelixDia{nullptr};
