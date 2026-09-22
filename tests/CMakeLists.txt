@@ -42,6 +42,28 @@ target_link_libraries(TestWinMax PRIVATE
 )
 add_test(NAME TestWinMax COMMAND TestWinMax)
 
+# Umfassender Integrationstest: alle Bearbeitungsarten + Simulation + Export
+add_executable(TestFullMachining TestFullMachining.cpp)
+target_link_libraries(TestFullMachining PRIVATE
+    cnc_core
+    cnc_geometry
+    cnc_cam
+    cnc_simulation
+    Qt6::Core
+)
+add_test(NAME TestFullMachining COMMAND TestFullMachining)
+
+# STL 3D-Fräs-Test: Feature-Erkennung → Auto-CAM → Simulation → Export
+add_executable(TestStlMilling TestStlMilling.cpp)
+target_link_libraries(TestStlMilling PRIVATE
+    cnc_core
+    cnc_geometry
+    cnc_cam
+    cnc_simulation
+    Qt6::Core
+)
+add_test(NAME TestStlMilling COMMAND TestStlMilling)
+
 # Sichtprüfung der Werkstück-Darstellung (kein automatischer Test)
 add_executable(RenderPreview RenderPreview.cpp)
 target_link_libraries(RenderPreview PRIVATE
