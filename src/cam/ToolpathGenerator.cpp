@@ -1138,4 +1138,288 @@ Toolpath ToolpathGenerator::generateStlMilling(const Geometry::Mesh& mesh,
     return tp;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Trochoidales Fräsen
+// ═══════════════════════════════════════════════════════════════════════
+
+Toolpath ToolpathGenerator::generateTrochoidalSlot(
+    double startX, double startY,
+    double endX, double endY,
+    double slotWidth,
+    const Core::ToolDefinition& tool,
+    double startZ, double targetZ, double clearanceZ,
+    double engagement, double feedFactor,
+    bool climbMilling) {
+
+    Toolpath tp(QStringLiteral("Trochoidale Nut"));
+
+    constexpr double kPi = 3.14159265358979323846;
+    const double toolDia = std::max(0.5, tool.diameter);
+    const double toolRadius = toolDia * 0.5;
+
+    // Trochoid-Radius: halbe Differenz Nut - Fräser
+    const double trochoidR = std::max(0.05, (slotWidth - toolDia) * 0.5);
+
+    // Trochoidaler Vorschub-Schritt pro Bogen (ae = d * engagement)
+    const double ae = std::max(0.05, toolDia * std::clamp(engagement, 0.02, 0.25));
+
+    // Richtungsvektor entlang der Nut
+    const double dx = endX - startX;
+    const double dy = endY - startY;
+    const double slotLen = std::hypot(dx, dy);
+    if (slotLen < 0.1) return tp;
+
+    // Einheitsvektor Vorschubrichtung und Senkrechte
+    const double ux = dx / slotLen;
+    const double uy = dy / slotLen;
+    const double nx = -uy;  // Senkrecht links
+    const double ny = ux;
+
+    // Vorschub: Basis-Feed * Faktor
+    const double feed = tool.defaultFeedRate * std::clamp(feedFactor, 1.0, 4.0);
+    const double plunge = tool.plungeFeedRate > 0.0 ? tool.plungeFeedRate : feed * 0.3;
+    const int arcSteps = 12;  // Punkte pro Halbkreis (linearisiert)
+
+    PathWriter w{tp, tool, Core::Vector3D(startX, startY, clearanceZ)};
+
+    // Z-Ebenen: volle Tiefe bevorzugt, aber stepDown begrenzt
+    const double maxAp = tool.fluteLength > 0.5 ? tool.fluteLength * 0.8 : toolDia * 2.0;
+    std::vector<double> levels;
+    {
+        double z = startZ;
+        while (z > targetZ + 1e-5) {
+            z = std::max(targetZ, z - maxAp);
+            levels.push_back(z);
+        }
+        if (levels.empty()) levels.push_back(targetZ);
+    }
+
+    for (double zLevel : levels) {
+        // Anfahren über Nutstart
+        w.rapid(startX, startY, clearanceZ);
+
+        // Helix-Eintauchen am Startpunkt (Kreisbogen spiralförmig nach unten)
+        if (trochoidR > 0.3) {
+            const int helixSteps = 24;
+            const double helixDz = (w.pos.z - zLevel) / helixSteps;
+            double hz = w.pos.z;
+            for (int i = 0; i < helixSteps; ++i) {
+                hz -= helixDz;
+                const double a = 2.0 * kPi * i / helixSteps;
+                const double hx = startX + trochoidR * std::cos(a) * 0.5;
+                const double hy = startY + trochoidR * std::sin(a) * 0.5;
+                w.feed(hx, hy, hz, plunge);
+            }
+            w.feed(startX, startY, zLevel, plunge);
+        } else {
+            // Direkt eintauchen bei sehr kleinem Radius
+            w.feed(startX, startY, zLevel, plunge);
+        }
+
+        // Trochoidale Bahnen entlang der Nutmittellinie
+        double pos = 0.0;  // Position entlang der Nut
+        while (pos < slotLen - 1e-3) {
+            const double cx = startX + ux * pos;
+            const double cy = startY + uy * pos;
+
+            // Schnittbogen: Halbkreis zur einen Seite (Gleichlauf)
+            for (int i = 0; i <= arcSteps; ++i) {
+                double a;
+                if (climbMilling) {
+                    a = kPi * 0.5 + kPi * i / arcSteps;  // links herum
+                } else {
+                    a = kPi * 0.5 - kPi * i / arcSteps;  // rechts herum
+                }
+                const double px = cx + trochoidR * (nx * std::cos(a) + ux * std::sin(a));
+                const double py = cy + trochoidR * (ny * std::cos(a) + uy * std::sin(a));
+                w.feed(px, py, zLevel, feed);
+            }
+
+            // Rückkehrbogen: Halbkreis zur anderen Seite (Rücklauf)
+            for (int i = 0; i <= arcSteps; ++i) {
+                double a;
+                if (climbMilling) {
+                    a = -kPi * 0.5 - kPi * i / arcSteps;
+                } else {
+                    a = -kPi * 0.5 + kPi * i / arcSteps;
+                }
+                const double px = cx + trochoidR * (nx * std::cos(a) + ux * std::sin(a));
+                const double py = cy + trochoidR * (ny * std::cos(a) + uy * std::sin(a));
+                w.feed(px, py, zLevel, feed);
+            }
+
+            // Vorschub entlang der Nut um ae
+            pos += ae;
+            const double nextX = startX + ux * std::min(pos, slotLen);
+            const double nextY = startY + uy * std::min(pos, slotLen);
+            w.feed(nextX, nextY, zLevel, feed);
+        }
+
+        // Schlichtbahn: Einmal die Nutwand entlang (volle Kontur)
+        // Rechte Wand
+        w.feed(startX + nx * trochoidR, startY + ny * trochoidR, zLevel, feed);
+        w.feed(endX + nx * trochoidR, endY + ny * trochoidR, zLevel, feed);
+        // Endkappe (Halbkreis)
+        for (int i = 1; i <= arcSteps; ++i) {
+            const double a = kPi * 0.5 - kPi * i / arcSteps;
+            w.feed(endX + trochoidR * (nx * std::cos(a) - ux * std::sin(a)),
+                   endY + trochoidR * (ny * std::cos(a) - uy * std::sin(a)),
+                   zLevel, feed);
+        }
+        // Linke Wand zurück
+        w.feed(startX - nx * trochoidR, startY - ny * trochoidR, zLevel, feed);
+        // Startkappe (Halbkreis)
+        for (int i = 1; i <= arcSteps; ++i) {
+            const double a = -kPi * 0.5 - kPi * i / arcSteps;
+            w.feed(startX + trochoidR * (nx * std::cos(a) + ux * std::sin(a)),
+                   startY + trochoidR * (ny * std::cos(a) + uy * std::sin(a)),
+                   zLevel, feed);
+        }
+    }
+
+    // Rückzug
+    w.rapid(w.pos.x, w.pos.y, clearanceZ);
+
+    return tp;
+}
+
+Toolpath ToolpathGenerator::generateTrochoidalPocket(
+    const Geometry::Contour& boundary,
+    const Core::ToolDefinition& tool,
+    double startZ, double targetZ, double clearanceZ,
+    double engagement, double feedFactor,
+    bool climbMilling) {
+
+    Toolpath tp(QStringLiteral("Trochoidale Tasche"));
+    if (boundary.points.size() < 3) return tp;
+
+    constexpr double kPi = 3.14159265358979323846;
+    const double toolDia = std::max(0.5, tool.diameter);
+    const double toolRadius = toolDia * 0.5;
+    const double ae = std::max(0.05, toolDia * std::clamp(engagement, 0.02, 0.25));
+    const double feed = tool.defaultFeedRate * std::clamp(feedFactor, 1.0, 4.0);
+    const double plunge = tool.plungeFeedRate > 0.0 ? tool.plungeFeedRate : feed * 0.3;
+
+    // Bounding Box der Tasche
+    double bMinX = 1e20, bMinY = 1e20, bMaxX = -1e20, bMaxY = -1e20;
+    for (const auto& p : boundary.points) {
+        bMinX = std::min(bMinX, p.x);
+        bMinY = std::min(bMinY, p.y);
+        bMaxX = std::max(bMaxX, p.x);
+        bMaxY = std::max(bMaxY, p.y);
+    }
+    const double cx = (bMinX + bMaxX) * 0.5;
+    const double cy = (bMinY + bMaxY) * 0.5;
+    const double pocketW = bMaxX - bMinX;
+    const double pocketH = bMaxY - bMinY;
+    const double maxDist = std::hypot(pocketW, pocketH) * 0.5 + toolRadius;
+
+    // Polygon-Punkt-Test
+    auto inBoundary = [&boundary, toolRadius](double x, double y) -> bool {
+        const auto& pts = boundary.points;
+        if (pts.size() < 3) return false;
+        bool inside = false;
+        for (size_t i = 0, j = pts.size() - 1; i < pts.size(); j = i++) {
+            if (((pts[i].y > y) != (pts[j].y > y)) &&
+                (x < (pts[j].x - pts[i].x) * (y - pts[i].y) / (pts[j].y - pts[i].y) + pts[i].x)) {
+                inside = !inside;
+            }
+        }
+        return inside;
+    };
+
+    // Z-Ebenen
+    const double maxAp = tool.fluteLength > 0.5 ? tool.fluteLength * 0.8 : toolDia * 2.0;
+    std::vector<double> levels;
+    {
+        double z = startZ;
+        while (z > targetZ + 1e-5) {
+            z = std::max(targetZ, z - maxAp);
+            levels.push_back(z);
+        }
+        if (levels.empty()) levels.push_back(targetZ);
+    }
+
+    const int arcSteps = 12;
+    PathWriter w{tp, tool, Core::Vector3D(cx, cy, clearanceZ)};
+
+    for (double zLevel : levels) {
+        // Anfahren über Taschenmitte
+        w.rapid(cx, cy, clearanceZ);
+
+        // Helix-Eintauchen in der Mitte
+        {
+            const double helixR = std::min(ae * 2.0, toolRadius * 0.8);
+            const int helixSteps = 24;
+            const double dz = (w.pos.z - zLevel) / helixSteps;
+            double hz = w.pos.z;
+            for (int i = 0; i < helixSteps; ++i) {
+                hz -= dz;
+                const double a = 2.0 * kPi * i / helixSteps;
+                w.feed(cx + helixR * std::cos(a), cy + helixR * std::sin(a), hz, plunge);
+            }
+            w.feed(cx, cy, zLevel, plunge);
+        }
+
+        // Trochoidale Spirale: vom Zentrum nach außen
+        double spiralR = ae;
+        while (spiralR < maxDist) {
+            // Trochoidal-Bogen bei aktuellem Radius
+            const int steps = std::max(8, static_cast<int>(2.0 * kPi * spiralR / ae));
+            bool anyInside = false;
+
+            for (int i = 0; i < steps; ++i) {
+                const double a = 2.0 * kPi * i / steps;
+                const double bx = cx + spiralR * std::cos(a);
+                const double by = cy + spiralR * std::sin(a);
+
+                // Prüfe ob Punkt innerhalb der Tasche (mit Fräserradius Abstand zur Wand)
+                if (!inBoundary(bx, by)) continue;
+                anyInside = true;
+
+                // Trochoid-Kreisbogen an dieser Position
+                const double trochR = ae * 0.5;
+                for (int j = 0; j <= arcSteps; ++j) {
+                    const double ta = a + kPi * j / arcSteps;
+                    const double tx = bx + trochR * std::cos(ta);
+                    const double ty = by + trochR * std::sin(ta);
+                    if (inBoundary(tx, ty)) {
+                        w.feed(tx, ty, zLevel, feed);
+                    }
+                }
+
+                // Vorschub zum nächsten Punkt
+                const double nextA = 2.0 * kPi * (i + 1) / steps;
+                const double nx2 = cx + spiralR * std::cos(nextA);
+                const double ny2 = cy + spiralR * std::sin(nextA);
+                if (inBoundary(nx2, ny2)) {
+                    w.feed(nx2, ny2, zLevel, feed);
+                }
+            }
+
+            if (!anyInside && spiralR > toolDia) break;  // Tasche vollständig geräumt
+            spiralR += ae;
+        }
+
+        // Schlicht-Konturfahrt: einmal die Taschenwand entlang
+        {
+            auto innerContour = boundary.createOffset(
+                boundary.isClockwise() ? toolRadius : -toolRadius);
+            if (innerContour.points.size() >= 3) {
+                const auto& ip = innerContour.points;
+                w.feed(ip[0].x, ip[0].y, zLevel, feed);
+                for (size_t i = 1; i < ip.size(); ++i) {
+                    w.feed(ip[i].x, ip[i].y, zLevel, feed);
+                }
+                w.feed(ip[0].x, ip[0].y, zLevel, feed);  // schließen
+            }
+        }
+    }
+
+    // Rückzug
+    w.rapid(w.pos.x, w.pos.y, clearanceZ);
+
+    return tp;
+}
+
 } // namespace GeminiCNC::CAM

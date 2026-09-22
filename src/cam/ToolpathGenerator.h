@@ -159,6 +159,31 @@ public:
                                                     const Core::BoundingBox& stockBounds,
                                                     const Core::ToolDefinition& tool,
                                                     const StlMillingParams& params);
+
+    // ═══ Trochoidales Fräsen ═══
+
+    /**
+     * @brief Erzeugt trochoidale Nutbahnen entlang einer Linie.
+     * Kreisförmige Schnittbögen mit geringem ae, hohem Vorschub, voller Tiefe.
+     */
+    [[nodiscard]] static Toolpath generateTrochoidalSlot(
+        double startX, double startY,
+        double endX, double endY,
+        double slotWidth,
+        const Core::ToolDefinition& tool,
+        double startZ, double targetZ, double clearanceZ,
+        double engagement, double feedFactor,
+        bool climbMilling = true);
+
+    /**
+     * @brief Erzeugt trochoidale Taschenbahnen (Spirale + Konturreinigung).
+     */
+    [[nodiscard]] static Toolpath generateTrochoidalPocket(
+        const Geometry::Contour& boundary,
+        const Core::ToolDefinition& tool,
+        double startZ, double targetZ, double clearanceZ,
+        double engagement, double feedFactor,
+        bool climbMilling = true);
 };
 
 } // namespace GeminiCNC::CAM

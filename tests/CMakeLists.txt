@@ -64,6 +64,17 @@ target_link_libraries(TestStlMilling PRIVATE
 )
 add_test(NAME TestStlMilling COMMAND TestStlMilling)
 
+# Trochoidales Fräsen: Material-ae, Slot, Pocket, Block-Integration
+add_executable(TestTrochoidalMilling TestTrochoidalMilling.cpp)
+target_link_libraries(TestTrochoidalMilling PRIVATE
+    cnc_core
+    cnc_geometry
+    cnc_cam
+    cnc_simulation
+    Qt6::Core
+)
+add_test(NAME TestTrochoidalMilling COMMAND TestTrochoidalMilling)
+
 # Sichtprüfung der Werkstück-Darstellung (kein automatischer Test)
 add_executable(RenderPreview RenderPreview.cpp)
 target_link_libraries(RenderPreview PRIVATE

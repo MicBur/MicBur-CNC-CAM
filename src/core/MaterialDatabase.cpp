@@ -14,6 +14,8 @@ QJsonObject Material::toJson() const {
     obj[QStringLiteral("maxStepDownRatio")] = maxStepDownRatio;
     obj[QStringLiteral("maxStepOverRatio")] = maxStepOverRatio;
     obj[QStringLiteral("plungeRatio")] = plungeRatio;
+    obj[QStringLiteral("trochoidalEngagement")] = trochoidalEngagement;
+    obj[QStringLiteral("trochoidalFeedFactor")] = trochoidalFeedFactor;
     return obj;
 }
 
@@ -27,6 +29,8 @@ Material Material::fromJson(const QJsonObject& json) {
     if (json.contains(QStringLiteral("maxStepDownRatio"))) m.maxStepDownRatio = json[QStringLiteral("maxStepDownRatio")].toDouble();
     if (json.contains(QStringLiteral("maxStepOverRatio"))) m.maxStepOverRatio = json[QStringLiteral("maxStepOverRatio")].toDouble();
     if (json.contains(QStringLiteral("plungeRatio"))) m.plungeRatio = json[QStringLiteral("plungeRatio")].toDouble();
+    if (json.contains(QStringLiteral("trochoidalEngagement"))) m.trochoidalEngagement = json[QStringLiteral("trochoidalEngagement")].toDouble();
+    if (json.contains(QStringLiteral("trochoidalFeedFactor"))) m.trochoidalFeedFactor = json[QStringLiteral("trochoidalFeedFactor")].toDouble();
     return m;
 }
 
@@ -59,6 +63,35 @@ CuttingParameters TechnologyCalculator::calculate(
     // 5. Zustellungen ap und ae
     params.recommendedStepDown = std::max(0.2, d * material.maxStepDownRatio);
     params.recommendedStepOver = std::max(0.2, d * material.maxStepOverRatio);
+
+    return params;
+}
+
+CuttingParameters TechnologyCalculator::calculateTrochoidal(
+    const Material& material,
+    const ToolDefinition& tool,
+    double maxSpindleRpm,
+    double minSpindleRpm) {
+
+    // Basis-Schnittdaten berechnen
+    CuttingParameters params = calculate(material, tool, maxSpindleRpm, minSpindleRpm);
+
+    const double d = std::max(0.5, tool.diameter);
+    const double engagement = std::clamp(material.trochoidalEngagement, 0.02, 0.25);
+    const double feedFactor = std::clamp(material.trochoidalFeedFactor, 1.0, 4.0);
+
+    // Trochoidale Zustellung: ae = d * engagement (z.B. 5-15% je nach Material)
+    params.recommendedStepOver = std::max(0.1, d * engagement);
+
+    // Volle Schneidtiefe: ap = Schneidlänge * 0.8 (nahezu volle Nutlänge)
+    const double fluteLen = tool.fluteLength > 0.5 ? tool.fluteLength : d * 2.0;
+    params.recommendedStepDown = std::max(0.5, fluteLen * 0.8);
+
+    // Vorschub erhöhen (geringere Schnittkräfte bei niedrigem ae)
+    params.feedRate = std::round(params.feedRate * feedFactor / 10.0) * 10.0;
+
+    // Eintauchvorschub bleibt konservativ
+    params.plungeFeedRate = std::round(params.feedRate * material.plungeRatio / 10.0) * 10.0;
 
     return params;
 }
@@ -107,6 +140,8 @@ void MaterialDatabase::initializeDefaults() {
     mAlu.maxStepDownRatio = 0.5;
     mAlu.maxStepOverRatio = 0.45;
     mAlu.plungeRatio = 0.35;
+    mAlu.trochoidalEngagement = 0.15;  // 15% — weiches Material
+    mAlu.trochoidalFeedFactor = 2.5;
     addMaterial(mAlu);
 
     // 2. POM / Delrin
@@ -119,6 +154,8 @@ void MaterialDatabase::initializeDefaults() {
     mPom.maxStepDownRatio = 0.8;
     mPom.maxStepOverRatio = 0.6;
     mPom.plungeRatio = 0.45;
+    mPom.trochoidalEngagement = 0.20;  // 20% — Kunststoff, sehr weich
+    mPom.trochoidalFeedFactor = 2.5;
     addMaterial(mPom);
 
     // 3. Messing
@@ -131,6 +168,8 @@ void MaterialDatabase::initializeDefaults() {
     mBrass.maxStepDownRatio = 0.4;
     mBrass.maxStepOverRatio = 0.4;
     mBrass.plungeRatio = 0.3;
+    mBrass.trochoidalEngagement = 0.12;  // 12% — mittlere Haerte
+    mBrass.trochoidalFeedFactor = 2.0;
     addMaterial(mBrass);
 
     // 4. Acrylglas
@@ -143,6 +182,8 @@ void MaterialDatabase::initializeDefaults() {
     mPmma.maxStepDownRatio = 0.5;
     mPmma.maxStepOverRatio = 0.4;
     mPmma.plungeRatio = 0.3;
+    mPmma.trochoidalEngagement = 0.18;  // 18% — Kunststoff
+    mPmma.trochoidalFeedFactor = 2.5;
     addMaterial(mPmma);
 
     // 5. Holz / MDF
@@ -155,6 +196,8 @@ void MaterialDatabase::initializeDefaults() {
     mWood.maxStepDownRatio = 1.0;
     mWood.maxStepOverRatio = 0.65;
     mWood.plungeRatio = 0.5;
+    mWood.trochoidalEngagement = 0.25;  // 25% — weiches Holz
+    mWood.trochoidalFeedFactor = 2.0;
     addMaterial(mWood);
 
     // 6. Baustahl
@@ -167,6 +210,8 @@ void MaterialDatabase::initializeDefaults() {
     mSteel.maxStepDownRatio = 0.25;
     mSteel.maxStepOverRatio = 0.35;
     mSteel.plungeRatio = 0.25;
+    mSteel.trochoidalEngagement = 0.08;  // 8% — Stahl, konservativ
+    mSteel.trochoidalFeedFactor = 1.8;
     addMaterial(mSteel);
 }
 

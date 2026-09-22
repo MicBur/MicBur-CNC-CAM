@@ -1,5 +1,6 @@
 #include "ConversationalBlock.h"
 #include "ToolpathGenerator.h"
+#include "core/MaterialDatabase.h"
 #include "geometry/StlLoader.h"
 #include <algorithm>
 #include <cmath>
@@ -688,25 +689,51 @@ Toolpath ConversationalBlock::generateToolpath(const Core::ToolDefinition& tool,
         const double cs = std::cos(rad);
         const double sn = std::sin(rad);
         const int count = std::max(1, slotCount);
+
+        // Trochoidale Parameter aus Material laden (wenn auto)
+        double tEng = trochoidEngagement;
+        double tFeed = trochoidFeedFactor;
+        if (useTrochoidal && (tEng <= 0.0 || tFeed <= 0.0)) {
+            auto db = Core::MaterialDatabase::createDefault();
+            auto mat = db.findById(materialId);
+            if (tEng <= 0.0) tEng = mat.trochoidalEngagement;
+            if (tFeed <= 0.0) tFeed = mat.trochoidalFeedFactor;
+        }
+
         for (int k = 0; k < count; ++k) {
             const double cx = posX - sn * k * slotSpacing;
             const double cy = posY + cs * k * slotSpacing;
-            Geometry::Contour slotContour;
-            if (slotCornerR > 1e-6 && slotCornerR < slotWidth * 0.5 - 1e-6) {
-                slotContour = Geometry::Contour::createRoundedRectangle(cx, cy, slotLength, slotWidth, slotCornerR);
-                for (auto& p : slotContour.points) {
-                    const double lx = p.x - cx;
-                    const double ly = p.y - cy;
-                    p.x = cx + lx * cs - ly * sn;
-                    p.y = cy + lx * sn + ly * cs;
-                }
+
+            if (useTrochoidal) {
+                // Trochoidale Nut: Start/Endpunkt der Mittellinie
+                const double halfLen = slotLength * 0.5;
+                const double sx = cx - cs * halfLen;
+                const double sy = cy - sn * halfLen;
+                const double ex = cx + cs * halfLen;
+                const double ey = cy + sn * halfLen;
+                const Toolpath part = ToolpathGenerator::generateTrochoidalSlot(
+                    sx, sy, ex, ey, slotWidth, cutTool,
+                    startZ, targetZ, clearanceZ, tEng, tFeed,
+                    millingDirection == 0);
+                appendPath(tp, part, 0);
             } else {
-                slotContour = Geometry::Contour::createSlot(cx, cy, slotLength, slotWidth, slotAngleDeg);
+                Geometry::Contour slotContour;
+                if (slotCornerR > 1e-6 && slotCornerR < slotWidth * 0.5 - 1e-6) {
+                    slotContour = Geometry::Contour::createRoundedRectangle(cx, cy, slotLength, slotWidth, slotCornerR);
+                    for (auto& p : slotContour.points) {
+                        const double lx = p.x - cx;
+                        const double ly = p.y - cy;
+                        p.x = cx + lx * cs - ly * sn;
+                        p.y = cy + lx * sn + ly * cs;
+                    }
+                } else {
+                    slotContour = Geometry::Contour::createSlot(cx, cy, slotLength, slotWidth, slotAngleDeg);
+                }
+                const Toolpath part = (millingType == MillingType::Pocket)
+                    ? millPocket(slotContour, {})
+                    : millContour(slotContour, sideForMillingType());
+                appendPath(tp, part, 0);
             }
-            const Toolpath part = (millingType == MillingType::Pocket)
-                ? millPocket(slotContour, {})
-                : millContour(slotContour, sideForMillingType());
-            appendPath(tp, part, 0);
         }
         tp.operationName = name;
     } else if (type == BlockType::HelixThread) {
@@ -747,12 +774,29 @@ Toolpath ConversationalBlock::generateToolpath(const Core::ToolDefinition& tool,
         if (millingType == MillingType::Island) {
             // Insel: wird von der Taschengrenze davor ausgespart, eigener Block fräst nichts
         } else if (millingType == MillingType::Pocket) {
-            std::vector<Geometry::Contour> compiledIslands;
-            for (const auto& islandSegs : pocketIslands) {
-                auto islandContour = Geometry::Contour::createFromSegments(islandSegs, true);
-                if (!islandContour.empty()) compiledIslands.push_back(islandContour);
+            const bool doTrochoidal = (pocketStrategy == 3) || useTrochoidal;
+            if (doTrochoidal) {
+                // Trochoidale Tasche mit materialabhängigem ae
+                double tEng = trochoidEngagement;
+                double tFeed = trochoidFeedFactor;
+                if (tEng <= 0.0 || tFeed <= 0.0) {
+                    auto db = Core::MaterialDatabase::createDefault();
+                    auto mat = db.findById(materialId);
+                    if (tEng <= 0.0) tEng = mat.trochoidalEngagement;
+                    if (tFeed <= 0.0) tFeed = mat.trochoidalFeedFactor;
+                }
+                tp = ToolpathGenerator::generateTrochoidalPocket(
+                    boundary, cutTool,
+                    startZ, targetZ, clearanceZ,
+                    tEng, tFeed, millingDirection == 0);
+            } else {
+                std::vector<Geometry::Contour> compiledIslands;
+                for (const auto& islandSegs : pocketIslands) {
+                    auto islandContour = Geometry::Contour::createFromSegments(islandSegs, true);
+                    if (!islandContour.empty()) compiledIslands.push_back(islandContour);
+                }
+                tp = millPocket(boundary, compiledIslands);
             }
-            tp = millPocket(boundary, compiledIslands);
         } else {
             tp = millContour(boundary, sideForMillingType());
         }
@@ -1047,6 +1091,12 @@ QJsonObject ConversationalBlock::toJson() const {
     obj[QStringLiteral("slotCount")] = slotCount;
     obj[QStringLiteral("slotSpacing")] = slotSpacing;
 
+    // Trochoidales Fräsen
+    obj[QStringLiteral("useTrochoidal")] = useTrochoidal;
+    obj[QStringLiteral("trochoidEngagement")] = trochoidEngagement;
+    obj[QStringLiteral("trochoidFeedFactor")] = trochoidFeedFactor;
+    obj[QStringLiteral("trochoidFullDepth")] = trochoidFullDepth;
+
     // Helix / Gewinde
     obj[QStringLiteral("helixCW")] = helixCW;
     obj[QStringLiteral("helixStarts")] = helixStarts;
@@ -1226,6 +1276,12 @@ ConversationalBlock ConversationalBlock::fromJson(const QJsonObject& json) {
     readDouble(QStringLiteral("slotCornerR"), b.slotCornerR);
     readInt(QStringLiteral("slotCount"), b.slotCount);
     readDouble(QStringLiteral("slotSpacing"), b.slotSpacing);
+
+    // Trochoidales Fräsen
+    readBool(QStringLiteral("useTrochoidal"), b.useTrochoidal);
+    readDouble(QStringLiteral("trochoidEngagement"), b.trochoidEngagement);
+    readDouble(QStringLiteral("trochoidFeedFactor"), b.trochoidFeedFactor);
+    readBool(QStringLiteral("trochoidFullDepth"), b.trochoidFullDepth);
 
     // Helix / Gewinde
     readBool(QStringLiteral("helixCW"), b.helixCW);

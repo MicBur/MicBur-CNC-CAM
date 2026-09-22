@@ -212,7 +212,13 @@ public:
     double pocketDepthY{30.0};   // Tiefe Y
     double pocketRadius{15.0};   // Radius (Kreis oder Eckenradius)
     double pocketCornerR{3.0};   // Eckenradius bei Rechteck
-    int pocketStrategy{0};       // 0 = Zickzack, 1 = Spiral, 2 = Konturparallel
+    int pocketStrategy{0};       // 0 = Zickzack, 1 = Spiral, 2 = Konturparallel, 3 = Trochoidal
+
+    // ═══ Trochoidales Fräsen (Nut, Tasche, Kontur) ═══
+    bool useTrochoidal{false};           // Trochoidale Bahnen aktivieren
+    double trochoidEngagement{0.0};      // ae/d Verhältnis (0 = auto aus Material)
+    double trochoidFeedFactor{0.0};      // Vorschub-Multiplikator (0 = auto aus Material)
+    bool trochoidFullDepth{true};        // Volle Tiefe in einem Durchgang
 
     // -- Schrupp-/Schlicht-Optionen --
     bool enableFinishing{false};

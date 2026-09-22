@@ -18,6 +18,10 @@ struct Material {
     double maxStepOverRatio{0.5};  // Empfohlene radiale Zustellung ae relativ zu Ø
     double plungeRatio{0.4};       // Eintauchvorschub-Faktor (z.B. 40% des Arbeitsvorschubs)
 
+    // ═══ Trochoidales Fräsen ═══
+    double trochoidalEngagement{0.10};  // Radialer Eingriff ae/d (10% Standard, variiert je Material)
+    double trochoidalFeedFactor{2.0};   // Vorschub-Multiplikator vs. konventionell
+
     [[nodiscard]] QJsonObject toJson() const;
     [[nodiscard]] static Material fromJson(const QJsonObject& json);
 };
@@ -36,6 +40,16 @@ struct CuttingParameters {
 class TechnologyCalculator {
 public:
     [[nodiscard]] static CuttingParameters calculate(
+        const Material& material,
+        const ToolDefinition& tool,
+        double maxSpindleRpm = 24000.0,
+        double minSpindleRpm = 3000.0);
+
+    /**
+     * @brief Berechnet trochoidale Schnittdaten mit materialabhängigem ae.
+     * Höherer Vorschub, geringerer Eingriff, volle Schneidtiefe möglich.
+     */
+    [[nodiscard]] static CuttingParameters calculateTrochoidal(
         const Material& material,
         const ToolDefinition& tool,
         double maxSpindleRpm = 24000.0,
