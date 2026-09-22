@@ -1161,6 +1161,13 @@ void ConversationalEditorDialog::setupUi() {
     stlOptRow->addWidget(m_btnOptimizeStlParams);
     lStl->addRow(QStringLiteral("Optionen:"), stlOptRow);
 
+    m_chkStlTrochoidal = new QCheckBox(QStringLiteral("Trochoidales Schruppen (materialabhängig, ideal für Stahl/Titan)"), this);
+    m_chkStlTrochoidal->setToolTip(QStringLiteral("Verwendet trochoidale Kreisbögen beim Z-Ebenen-Schruppen.\n"
+        "Geringer radialer Eingriff (ae) je nach Material, dafür volle Tiefe und höherer Vorschub.\n"
+        "Aluminium: 15% ae/d | Messing: 12% | Baustahl: 8%"));
+    connect(m_chkStlTrochoidal, &QCheckBox::toggled, this, &ConversationalEditorDialog::saveCurrentBlockFromUi);
+    lStl->addRow(QString(), m_chkStlTrochoidal);
+
     m_stackParams->addWidget(pageStl); // Index 7
 
     // ════════════════════════════════════════════
@@ -1862,6 +1869,7 @@ void ConversationalEditorDialog::loadBlockToUi(int index) {
             m_spinStlAllowance->setValue(b.stlAllowance);
             m_spinStlSampleStep->setValue(b.stlSampleStep);
             m_chkStlUseStockDims->setChecked(b.stlUseStockDims);
+            m_chkStlTrochoidal->setChecked(b.useTrochoidal);
 
             // Wenn Z-Tiefe noch auf dem 2D-Default (-2.0 mm) steht:
             // Automatisch mit der realen Bauteiltiefe des STL-Modells vorbefüllen!
@@ -2049,6 +2057,7 @@ void ConversationalEditorDialog::saveCurrentBlockFromUi() {
         b.stlAllowance = m_spinStlAllowance->value();
         b.stlSampleStep = m_spinStlSampleStep->value();
         b.stlUseStockDims = m_chkStlUseStockDims->isChecked();
+        b.useTrochoidal = m_chkStlTrochoidal->isChecked();
         if (!m_partMesh.isEmpty()) {
             b.directStlMesh = m_partMesh;
         }

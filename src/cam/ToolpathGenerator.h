@@ -101,6 +101,9 @@ struct StlMillingParams {
     double finishAllowance{0.4};    // Schlichtaufmaß beim Schruppen (mm)
     double sampleStep{0.8};         // Punktabtastung entlang der Zeile (mm)
     double clearanceZ{5.0};         // Sicherheitshöhe über Werkstück (mm)
+    bool useTrochoidal{false};      // Trochoidales Schruppen (geringer ae, hoher Vorschub)
+    double trochoidalEngagement{0.0}; // ae/d (0 = auto aus Material)
+    double trochoidalFeedFactor{0.0}; // Vorschub-Multiplikator (0 = auto)
 };
 
 /**

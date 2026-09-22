@@ -971,60 +971,131 @@ Toolpath ToolpathGenerator::generateStlMilling(const Geometry::Mesh& mesh,
     bool doFinishing = (params.mode == StlMillingMode::RoughAndFinish || params.mode == StlMillingMode::FinishOnly ||
                         params.mode == StlMillingMode::FinishRasterXY || params.mode == StlMillingMode::WaterlineFinish);
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• 
     // PHASE 1: Intelligentes 3D Z-Ebenen Schruppen (Materialabtrag)
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• 
     if (doRoughing) {
         double curZ = areaBox.maxPoint.z;
         const double roughStepDown = std::max(0.2, params.roughStepDown);
-        const double roughStepOver = std::max(0.5, tool.diameter * params.roughStepOverRatio);
 
-        while (curZ > areaBox.minPoint.z - 1e-4) {
-            curZ -= roughStepDown;
-            if (curZ < areaBox.minPoint.z) curZ = areaBox.minPoint.z;
+        if (params.useTrochoidal && params.trochoidalEngagement > 0.01) {
+            // ── Trochoidales 3D-Schruppen ──
+            // Trochoidale Kreisbögen pro Z-Ebene mit materialabhängigem ae
+            const double trochoidAe = std::max(0.3, tool.diameter * params.trochoidalEngagement);
+            const double trochoidFeed = tool.defaultFeedRate * std::max(1.0, params.trochoidalFeedFactor);
+            const double trochoidR = trochoidAe * 0.5;  // Radius der Kreisbögen
+            constexpr int arcSteps = 12;  // Punkte pro Halbkreis
+            constexpr double kPi = 3.14159265358979323846;
 
-            double y = minY;
-            bool leftToRight = true;
+            while (curZ > areaBox.minPoint.z - 1e-4) {
+                curZ -= roughStepDown;
+                if (curZ < areaBox.minPoint.z) curZ = areaBox.minPoint.z;
 
-            while (y <= maxY + 1e-4) {
-                double startX = leftToRight ? minX : maxX;
-                double endX = leftToRight ? maxX : minX;
-                double dir = leftToRight ? 1.0 : -1.0;
+                double y = minY;
+                bool leftToRight = true;
 
-                // AnfahrhÃ¶he mit SchutzaufmaÃŸ
-                double surfaceZ = queryToolZ(startX, y);
-                double targetCutZ = std::max(curZ, surfaceZ);
+                while (y <= maxY + 1e-4) {
+                    const double startX = leftToRight ? minX : maxX;
+                    const double endX = leftToRight ? maxX : minX;
+                    const double dir = leftToRight ? 1.0 : -1.0;
 
-                tp.addSegment({MotionType::Rapid, currentPos, {startX, y, clearanceZ}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-                tp.addSegment({MotionType::LinearFeed, {startX, y, clearanceZ}, {startX, y, targetCutZ}, {}, tool.plungeFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-                currentPos = {startX, y, targetCutZ};
+                    // Eintauchen
+                    double surfaceZ = queryToolZ(startX, y);
+                    double targetCutZ = std::max(curZ, surfaceZ);
+                    tp.addSegment({MotionType::Rapid, currentPos, {startX, y, clearanceZ}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
+                    tp.addSegment({MotionType::LinearFeed, {startX, y, clearanceZ}, {startX, y, targetCutZ}, {}, tool.plungeFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
+                    currentPos = Core::Vector3D(startX, y, targetCutZ);
 
-                double curX = startX;
-                while ((dir > 0 && curX < endX - 1e-4) || (dir < 0 && curX > endX + 1e-4)) {
-                    curX += dir * sampleDx;
-                    if ((dir > 0 && curX > endX) || (dir < 0 && curX < endX)) curX = endX;
+                    // Trochoidale Bögen entlang X
+                    double cx = startX;
+                    bool halfUp = true;  // true = Bogen nach +Y, false = nach -Y
+                    while ((dir > 0 && cx < endX - 1e-4) || (dir < 0 && cx > endX + 1e-4)) {
+                        cx += dir * trochoidAe;
+                        if ((dir > 0 && cx > endX) || (dir < 0 && cx < endX)) cx = endX;
 
-                    double sZ = queryToolZ(curX, y);
-                    double cutZ = std::max(curZ, sZ);
-                    Core::Vector3D nextPt(curX, y, cutZ);
-                    tp.addSegment({MotionType::LinearFeed, currentPos, nextPt, {}, tool.defaultFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-                    currentPos = nextPt;
+                        double localSurfZ = queryToolZ(cx, y);
+                        double localCutZ = std::max(curZ, localSurfZ);
+
+                        // Linearisierter Halbkreis (12 Schritte)
+                        const double cxCenter = cx - dir * trochoidAe * 0.5;
+                        for (int i = 1; i <= arcSteps; ++i) {
+                            double t = static_cast<double>(i) / arcSteps;
+                            double angle = halfUp ? (kPi * t) : (-kPi * t);
+                            double ax = cxCenter + trochoidR * std::cos(angle) * dir;
+                            double ay = y + trochoidR * std::sin(angle);
+                            double az = std::max(localCutZ, queryToolZ(ax, ay));
+                            Core::Vector3D arcPt(ax, ay, az);
+                            tp.addSegment({MotionType::LinearFeed, currentPos, arcPt, {}, trochoidFeed, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
+                            currentPos = arcPt;
+                        }
+
+                        // Gerade zurück zur Zeilenmitte
+                        Core::Vector3D rowPt(cx, y, localCutZ);
+                        tp.addSegment({MotionType::LinearFeed, currentPos, rowPt, {}, trochoidFeed, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
+                        currentPos = rowPt;
+                        halfUp = !halfUp;
+                    }
+
+                    // Rückzug
+                    tp.addSegment({MotionType::Rapid, currentPos, {currentPos.x, currentPos.y, clearanceZ}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
+                    currentPos = Core::Vector3D(currentPos.x, currentPos.y, clearanceZ);
+
+                    y += trochoidAe;  // Trochoidaler Zeilenabstand = ae
+                    leftToRight = !leftToRight;
                 }
 
-                tp.addSegment({MotionType::Rapid, currentPos, {currentPos.x, currentPos.y, clearanceZ}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
-                currentPos = {currentPos.x, currentPos.y, clearanceZ};
-
-                y += roughStepOver;
-                leftToRight = !leftToRight;
+                if (std::abs(curZ - areaBox.minPoint.z) < 1e-4) break;
             }
+        } else {
+            // ── Konventionelles Zickzack-Schruppen ──
+            const double roughStepOver = std::max(0.5, tool.diameter * params.roughStepOverRatio);
 
-            if (std::abs(curZ - areaBox.minPoint.z) < 1e-4) break;
+            while (curZ > areaBox.minPoint.z - 1e-4) {
+                curZ -= roughStepDown;
+                if (curZ < areaBox.minPoint.z) curZ = areaBox.minPoint.z;
+
+                double y = minY;
+                bool leftToRight = true;
+
+                while (y <= maxY + 1e-4) {
+                    double startX = leftToRight ? minX : maxX;
+                    double endX = leftToRight ? maxX : minX;
+                    double dir = leftToRight ? 1.0 : -1.0;
+
+                    double surfaceZ = queryToolZ(startX, y);
+                    double targetCutZ = std::max(curZ, surfaceZ);
+
+                    tp.addSegment({MotionType::Rapid, currentPos, {startX, y, clearanceZ}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
+                    tp.addSegment({MotionType::LinearFeed, {startX, y, clearanceZ}, {startX, y, targetCutZ}, {}, tool.plungeFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
+                    currentPos = {startX, y, targetCutZ};
+
+                    double curX = startX;
+                    while ((dir > 0 && curX < endX - 1e-4) || (dir < 0 && curX > endX + 1e-4)) {
+                        curX += dir * sampleDx;
+                        if ((dir > 0 && curX > endX) || (dir < 0 && curX < endX)) curX = endX;
+
+                        double sZ = queryToolZ(curX, y);
+                        double cutZ = std::max(curZ, sZ);
+                        Core::Vector3D nextPt(curX, y, cutZ);
+                        tp.addSegment({MotionType::LinearFeed, currentPos, nextPt, {}, tool.defaultFeedRate, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
+                        currentPos = nextPt;
+                    }
+
+                    tp.addSegment({MotionType::Rapid, currentPos, {currentPos.x, currentPos.y, clearanceZ}, {}, 0, tool.spindleSpeed, false, tool.id, tool.diameter, 0, false, {}});
+                    currentPos = {currentPos.x, currentPos.y, clearanceZ};
+
+                    y += roughStepOver;
+                    leftToRight = !leftToRight;
+                }
+
+                if (std::abs(curZ - areaBox.minPoint.z) < 1e-4) break;
+            }
         }
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• 
     // PHASE 2: Intelligentes 3D FreiformflÃ¤chen-Schlichten (Endkontur)
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• 
     if (doFinishing) {
         const double finishStepOver = std::max(0.05, params.finishStepOver);
 

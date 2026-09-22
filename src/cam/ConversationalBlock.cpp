@@ -960,6 +960,21 @@ Toolpath ConversationalBlock::generateToolpath(const Core::ToolDefinition& tool,
             params.sampleStep = stlSampleStep;
             params.clearanceZ = clearanceZ;
 
+            // Trochoidales Schruppen: Material-ae laden wenn aktiviert
+            if (useTrochoidal) {
+                params.useTrochoidal = true;
+                double tEng = trochoidEngagement;
+                double tFeed = trochoidFeedFactor;
+                if (tEng <= 0.0 || tFeed <= 0.0) {
+                    auto db = Core::MaterialDatabase::createDefault();
+                    auto mat = db.findById(materialId);
+                    if (tEng <= 0.0) tEng = mat.trochoidalEngagement;
+                    if (tFeed <= 0.0) tFeed = mat.trochoidalFeedFactor;
+                }
+                params.trochoidalEngagement = tEng;
+                params.trochoidalFeedFactor = tFeed;
+            }
+
             if (stlStrategy == StlMillingStrategy::RoughAndFinishX || 
                 stlStrategy == StlMillingStrategy::RoughAndFinishY) {
                 

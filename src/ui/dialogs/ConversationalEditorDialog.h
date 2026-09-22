@@ -329,6 +329,7 @@ private:
     QDoubleSpinBox* m_spinStlAllowance{nullptr};
     QDoubleSpinBox* m_spinStlSampleStep{nullptr};
     QCheckBox* m_chkStlUseStockDims{nullptr};
+    QCheckBox* m_chkStlTrochoidal{nullptr};  // Trochoidales Schruppen bei 3D
     QPushButton* m_btnOptimizeStlParams{nullptr};
     QDoubleSpinBox* m_spinStlScale{nullptr};
     QPushButton* m_btnApplyStlScale{nullptr};
